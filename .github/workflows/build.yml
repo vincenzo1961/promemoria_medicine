@@ -35,7 +35,10 @@ jobs:
           key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
 
       - name: Costruisci l'APK
+        env:
+          PIP_CONSTRAINT: ${{ github.workspace }}/vincoli-pip.txt
         run: |
+          echo "pip==25.3" > vincoli-pip.txt
           yes | buildozer android debug > registro.txt 2>&1 || { echo "===== ERRORE: ULTIME RIGHE ====="; tail -n 150 registro.txt; exit 1; }
           tail -n 20 registro.txt
 
