@@ -4,7 +4,11 @@ package.name = promemoriamedicine
 package.domain = org.vincenzo
 source.dir = .
 source.include_exts = py,png,jpg,wav
-version = 1.0
+version = 1.1
+
+icon.filename = %(source.dir)s/icon_512.png
+presplash.filename = %(source.dir)s/presplash.png
+android.presplash_color = #FFF8E7
 
 requirements = python3,kivy,pyjnius,android
 
