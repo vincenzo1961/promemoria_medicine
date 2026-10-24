@@ -612,13 +612,14 @@ class SchermataModifica(Screen):
 
         esterno = BoxLayout()
         sfondo(esterno, BG)
-        scroll = ScrollView()
-        box = BoxLayout(orientation="vertical", size_hint_y=None, padding=dp(12), spacing=dp(8))
+        scroll = ScrollView()   # resta solo per i telefoni con schermo molto piccolo
+        box = BoxLayout(orientation="vertical", size_hint_y=None, padding=dp(10), spacing=dp(5))
         box.bind(minimum_height=box.setter("height"))
 
-        self.titolo = etichetta("Medicina", 26, True)
+        self.titolo = etichetta("Medicina", 22, True)
         box.add_widget(self.titolo)
 
+        # --- campi di testo, compatti ---
         self.campi = {}
         for chiave, testo, alto in [
             ("nome", "Nome della medicina", False),
@@ -626,37 +627,51 @@ class SchermataModifica(Screen):
             ("orari", "Orari (es. 08:00, 20:00)", False),
             ("messaggio", "Frase da dire (facoltativa)", True),
         ]:
-            box.add_widget(etichetta(testo, 16, halign="left"))
-            ti = TextInput(multiline=alto, font_size=sp(20), size_hint_y=None,
-                           height=dp(100) if alto else dp(54))
+            box.add_widget(etichetta(testo, 13, halign="left", altezza=dp(18)))
+            ti = TextInput(multiline=alto, font_size=sp(17), size_hint_y=None,
+                           height=dp(62) if alto else dp(40), padding=(dp(8), dp(8)))
             box.add_widget(ti)
             self.campi[chiave] = ti
 
-        # --- foto ---
-        box.add_widget(etichetta("Foto della medicina", 16, True, halign="left"))
-        self.anteprima = Image(size_hint_y=None, height=dp(170), fit_mode="contain")
-        box.add_widget(self.anteprima)
-        r = BoxLayout(size_hint_y=None, height=dp(60), spacing=dp(8))
-        r.add_widget(bottone("Scegli foto", BLU, 18, dp(60), self.scegli_foto))
-        r.add_widget(bottone("Togli foto", GRIGIO, 18, dp(60), self.togli_foto))
+        # --- foto: anteprima a sinistra, pulsanti a destra ---
+        box.add_widget(etichetta("Foto della medicina", 13, True, halign="left", altezza=dp(20)))
+        r = BoxLayout(size_hint_y=None, height=dp(96), spacing=dp(6))
+        cornice = BoxLayout(size_hint_x=0.42)
+        sfondo(cornice, "#FFFFFF")
+        self.anteprima = Image(fit_mode="contain")
+        self.lbl_nofoto = etichetta("nessuna\nfoto", 13, colore=GRIGIO)
+        self.lbl_nofoto.size_hint_y = 1
+        cornice.add_widget(self.anteprima)
+        self.cornice = cornice
+        r.add_widget(cornice)
+        col = BoxLayout(orientation="vertical", spacing=dp(6))
+        col.add_widget(bottone("Scegli foto", BLU, 15, dp(45), self.scegli_foto))
+        col.add_widget(bottone("Togli foto", GRIGIO, 15, dp(45), self.togli_foto))
+        r.add_widget(col)
         box.add_widget(r)
 
         # --- messaggio vocale ---
-        box.add_widget(etichetta("Messaggio vocale registrato", 16, True, halign="left"))
-        self.lbl_audio = etichetta("", 15, colore=GRIGIO)
+        box.add_widget(etichetta("Messaggio vocale registrato", 13, True, halign="left",
+                                 altezza=dp(20)))
+        self.lbl_audio = etichetta("", 12, colore=GRIGIO, altezza=dp(18))
         box.add_widget(self.lbl_audio)
-        r = BoxLayout(size_hint_y=None, height=dp(60), spacing=dp(8))
-        r.add_widget(bottone("Scegli", BLU, 18, dp(60), self.scegli_audio))
-        r.add_widget(bottone("Ascolta", BLU, 18, dp(60), self.ascolta))
-        r.add_widget(bottone("Togli", GRIGIO, 18, dp(60), self.togli_audio))
+        r = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+        r.add_widget(bottone("Scegli", BLU, 15, dp(44), self.scegli_audio))
+        r.add_widget(bottone("Ascolta", BLU, 15, dp(44), self.ascolta))
+        r.add_widget(bottone("Togli", GRIGIO, 15, dp(44), self.togli_audio))
         box.add_widget(r)
 
-        box.add_widget(etichetta("", 8))
-        box.add_widget(bottone("SALVA", VERDE, azione=self.salva))
-        box.add_widget(bottone("Prova la sveglia", ARANCIO, azione=self.prova))
-        box.add_widget(bottone("Elimina medicina", ROSSO, azione=self.elimina))
-        box.add_widget(bottone("Indietro", GRIGIO,
-                               azione=lambda: App.get_running_app().vai("gestione")))
+        # --- azioni: due per riga ---
+        box.add_widget(etichetta("", 4, altezza=dp(4)))
+        r = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(6))
+        r.add_widget(bottone("SALVA", VERDE, 18, dp(52), self.salva))
+        r.add_widget(bottone("Prova la sveglia", ARANCIO, 15, dp(52), self.prova))
+        box.add_widget(r)
+        r = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
+        r.add_widget(bottone("Elimina", ROSSO, 15, dp(46), self.elimina))
+        r.add_widget(bottone("Indietro", GRIGIO, 15, dp(46),
+                             lambda: App.get_running_app().vai("gestione")))
+        box.add_widget(r)
 
         scroll.add_widget(box)
         esterno.add_widget(scroll)
@@ -677,9 +692,14 @@ class SchermataModifica(Screen):
         self._mostra()
 
     def _mostra(self):
-        self.anteprima.source = self.foto if self.foto and os.path.exists(self.foto) else ""
-        self.anteprima.opacity = 1 if self.anteprima.source else 0
-        self.anteprima.height = dp(170) if self.anteprima.source else 0
+        ce_foto = bool(self.foto and os.path.exists(self.foto))
+        self.cornice.clear_widgets()
+        if ce_foto:
+            self.anteprima.source = self.foto
+            self.cornice.add_widget(self.anteprima)
+        else:
+            self.anteprima.source = ""
+            self.cornice.add_widget(self.lbl_nofoto)
         self.lbl_audio.text = ("Messaggio vocale impostato" if self.audio
                                else "Nessuno: userà la voce del telefono")
 
