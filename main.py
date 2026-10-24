@@ -20,7 +20,11 @@ import math
 import os
 import shutil
 import struct
+import ssl
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 import wave
 
@@ -88,9 +92,57 @@ if ANDROID:
     PythonActivity = autoclass("org.kivy.android.PythonActivity")
 
     @run_on_ui_thread
-    def tieni_schermo_acceso():
-        # FLAG_KEEP_SCREEN_ON = 128: lo schermo non si spegne mai mentre l'app è aperta
-        PythonActivity.mActivity.getWindow().addFlags(128)
+    def imposta_schermo(sempre_acceso):
+        """Mostra l'app anche sopra il blocco schermo e decide se lo schermo resta acceso."""
+        att = PythonActivity.mActivity
+        finestra = att.getWindow()
+        try:
+            if autoclass("android.os.Build$VERSION").SDK_INT >= 27:
+                att.setShowWhenLocked(True)
+                att.setTurnScreenOn(True)
+            else:
+                # SHOW_WHEN_LOCKED | TURN_SCREEN_ON | DISMISS_KEYGUARD
+                finestra.addFlags(0x00080000 | 0x00200000 | 0x00400000)
+        except Exception as e:
+            print("Blocco schermo:", e)
+        if sempre_acceso:
+            finestra.addFlags(128)          # FLAG_KEEP_SCREEN_ON
+        else:
+            finestra.clearFlags(128)
+
+    def apri_impostazioni_telefono(quale="android.settings.SETTINGS"):
+        try:
+            Intent = autoclass("android.content.Intent")
+            i = Intent(quale)
+            i.addFlags(0x10000000)
+            PythonActivity.mActivity.startActivity(i)
+        except Exception as e:
+            print("Impostazioni telefono:", e)
+            if quale != "android.settings.SETTINGS":
+                apri_impostazioni_telefono()
+
+    def programma_risveglio(quando_ms):
+        """Sveglia di sistema: all'ora indicata Android riaccende il telefono e apre l'app,
+        anche se è in standby o bloccato."""
+        try:
+            from jnius import cast
+            Intent = autoclass("android.content.Intent")
+            PendingIntent = autoclass("android.app.PendingIntent")
+            AlarmClockInfo = autoclass("android.app.AlarmManager$AlarmClockInfo")
+            att = PythonActivity.mActivity
+            intent = Intent(att, att.getClass())
+            intent.addFlags(0x10000000 | 0x20000000)        # NEW_TASK | SINGLE_TOP
+            pi = PendingIntent.getActivity(att, 4242, intent, 0x08000000 | 0x04000000)  # UPDATE | IMMUTABLE
+            am = cast("android.app.AlarmManager", att.getSystemService("alarm"))
+            try:
+                am.setAlarmClock(AlarmClockInfo(quando_ms, pi), pi)
+            except Exception as e:
+                print("setAlarmClock non riuscito, uso setExact:", e)
+                am.setExactAndAllowWhileIdle(0, quando_ms, pi)   # 0 = RTC_WAKEUP
+            return True
+        except Exception as e:
+            print("Risveglio non programmato:", e)
+            return False
 
     def chiedi_permessi(poi):
         """Chiede il permesso di leggere foto e audio, e SOLO DOPO apre la scelta file."""
@@ -105,8 +157,14 @@ if ANDROID:
             print("Permessi:", e)
             poi()
 else:
-    def tieni_schermo_acceso():
+    def imposta_schermo(sempre_acceso):
         pass
+
+    def programma_risveglio(quando_ms):
+        return False
+
+    def apri_impostazioni_telefono(quale=""):
+        avviso("Solo sul telefono", "Questo pulsante apre le impostazioni\ndi Android: sul PC non fa nulla.")
 
     def chiedi_permessi(poi):
         poi()
@@ -157,8 +215,56 @@ def pulisci_numeri(testo):
     return numeri
 
 
+def _contesto_ssl():
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def _telegram(token, metodo, parametri=None):
+    url = f"https://api.telegram.org/bot{token.strip()}/{metodo}"
+    dati = urllib.parse.urlencode(parametri or {}).encode() if parametri else None
+    with urllib.request.urlopen(url, data=dati, timeout=20, context=_contesto_ssl()) as r:
+        return json.load(r)
+
+
+def invia_telegram(token, chat_id, testo):
+    """Manda un messaggio Telegram. Restituisce (True, '') oppure (False, motivo)."""
+    if not token:
+        return False, "manca il codice del bot"
+    try:
+        r = _telegram(token, "sendMessage", {"chat_id": chat_id, "text": testo})
+        return (True, "") if r.get("ok") else (False, r.get("description", "errore"))
+    except urllib.error.HTTPError as e:
+        return False, "codice del bot sbagliato" if e.code == 401 else f"errore {e.code}"
+    except Exception as e:
+        return False, "niente internet" if "urlopen" in str(e) or "resolve" in str(e) else str(e)
+
+
+def cerca_chat_telegram(token):
+    """Chi ha scritto al bot: [{'id':..., 'nome':...}]. Restituisce (lista, errore)."""
+    try:
+        r = _telegram(token, "getUpdates")
+    except urllib.error.HTTPError as e:
+        return [], "codice del bot sbagliato" if e.code == 401 else f"errore {e.code}"
+    except Exception as e:
+        return [], f"niente internet ({e})"
+    trovate = {}
+    for u in r.get("result", []):
+        msg = u.get("message") or u.get("my_chat_member") or {}
+        chat = msg.get("chat") or {}
+        if "id" in chat:
+            nome = (chat.get("first_name", "") + " " + chat.get("last_name", "")).strip()
+            trovate[chat["id"]] = nome or chat.get("title") or str(chat["id"])
+    return [{"id": k, "nome": v} for k, v in trovate.items()], ""
+
+
 AVVISI_PREDEFINITI = {"numeri": [], "presa": True, "non_confermata": True,
-                      "rimandi": True, "rimandi_max": 3}
+                      "rimandi": True, "rimandi_max": 3,
+                      "sms_attivo": True, "telegram_attivo": False, "token": "", "chat": [],
+                      "schermo_sempre_acceso": True}
 
 
 def carica_avvisi(percorso):
@@ -727,14 +833,35 @@ class SchermataGestione(Screen):
         r.add_widget(bottone("Persone", "#7B4FB8", 20, dp(60), lambda: app.vai("persone")))
         r.add_widget(bottone("Storico", BLU, 20, dp(60), lambda: app.vai("storico")))
         box.add_widget(r)
-        box.add_widget(bottone("Avvisi SMS ai familiari", "#00897B", 20, dp(60),
+        box.add_widget(bottone("Avvisi ai familiari (SMS / Telegram)", "#00897B", 18, dp(60),
                                lambda: app.vai("avvisi")))
+        self.btn_schermo = bottone("", "#5A5A5A", 15, dp(44), self._cambia_schermo)
+        box.add_widget(self.btn_schermo)
+        r = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
+        r.add_widget(bottone("Impostazioni del telefono", "#5A5A5A", 14, dp(44),
+                             apri_impostazioni_telefono))
+        r.add_widget(bottone("Scegli schermata Home", "#5A5A5A", 14, dp(44),
+                             lambda: apri_impostazioni_telefono("android.settings.HOME_SETTINGS")))
+        box.add_widget(r)
         box.add_widget(bottone("Torna all'orologio", GRIGIO, 20, dp(60),
                                lambda: app.vai("principale")))
         self.add_widget(box)
 
+    def _testo_schermo(self):
+        acceso = App.get_running_app().avvisi.get("schermo_sempre_acceso", True)
+        self.btn_schermo.text = ("Schermo sempre acceso: SÌ  (tocca per cambiare)" if acceso else
+                                 "Schermo sempre acceso: NO - si spegne, la sveglia lo riaccende")
+
+    def _cambia_schermo(self):
+        app = App.get_running_app()
+        app.avvisi["schermo_sempre_acceso"] = not app.avvisi.get("schermo_sempre_acceso", True)
+        app.salva_avvisi()
+        imposta_schermo(app.avvisi["schermo_sempre_acceso"])
+        self._testo_schermo()
+
     def on_pre_enter(self, *_):
         app = App.get_running_app()
+        self._testo_schermo()
         self.lista.clear_widgets()
         for i, m in enumerate(app.medicine):
             persona = app.persona_di(m)
@@ -1100,7 +1227,7 @@ class SchermataPersona(Screen):
 
 
 # =====================================================
-#  IMPOSTAZIONI: AVVISI SMS
+#  IMPOSTAZIONI: AVVISI AI FAMILIARI (SMS e TELEGRAM)
 # =====================================================
 class SchermataAvvisi(Screen):
     VOCI = [
@@ -1109,6 +1236,24 @@ class SchermataAvvisi(Screen):
         ("rimandi", "Quando una dose viene rimandata\npiù volte di seguito"),
     ]
 
+    def _interruttore(self, box, chiave, testo, alto=dp(54)):
+        r = BoxLayout(size_hint_y=None, height=alto, spacing=dp(8))
+        l = etichetta(testo, 15, halign="left")
+        l.size_hint_y = 1
+        r.add_widget(l)
+        b = bottone("", GRIGIO, 17, alto, lambda k=chiave: self._cambia(k))
+        b.size_hint_x = None
+        b.width = dp(90)
+        r.add_widget(b)
+        self.interruttori[chiave] = b
+        box.add_widget(r)
+
+    def _titolo(self, box, testo):
+        t = Label(text=testo, font_size=sp(17), bold=True, color=(1, 1, 1, 1),
+                  size_hint_y=None, height=dp(34))
+        sfondo(t, "#00897B")
+        box.add_widget(t)
+
     def __init__(self, **kw):
         super().__init__(**kw)
         esterno = BoxLayout()
@@ -1116,51 +1261,65 @@ class SchermataAvvisi(Screen):
         scroll = ScrollView()
         box = BoxLayout(orientation="vertical", size_hint_y=None, padding=dp(12), spacing=dp(6))
         box.bind(minimum_height=box.setter("height"))
+        self.interruttori = {}
 
-        box.add_widget(etichetta("Avvisi SMS ai familiari", 24, True))
-        box.add_widget(etichetta("Numeri a cui mandare gli SMS (uno per riga)", 14,
-                                 halign="left", altezza=dp(22)))
-        self.numeri = TextInput(font_size=sp(19), size_hint_y=None, height=dp(96),
+        box.add_widget(etichetta("Avvisi ai familiari", 24, True))
+
+        # --- quando ---
+        self._titolo(box, "QUANDO AVVISARE")
+        for chiave, testo in self.VOCI:
+            self._interruttore(box, chiave, testo)
+        r = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(8))
+        l = etichetta("Rinvii prima dell'avviso", 15, halign="left")
+        l.size_hint_y = 1
+        r.add_widget(l)
+        r.add_widget(bottone("-", GRIGIO, 24, dp(50), lambda: self._rinvii(-1)))
+        self.lbl_rinvii = etichetta("3", 24, True, altezza=dp(50))
+        self.lbl_rinvii.size_hint_x = None
+        self.lbl_rinvii.width = dp(44)
+        r.add_widget(self.lbl_rinvii)
+        r.add_widget(bottone("+", GRIGIO, 24, dp(50), lambda: self._rinvii(1)))
+        box.add_widget(r)
+
+        # --- SMS ---
+        self._titolo(box, "SMS")
+        self._interruttore(box, "sms_attivo", "Manda gli avvisi per SMS")
+        box.add_widget(etichetta("Numeri di telefono (uno per riga)", 13, halign="left",
+                                 altezza=dp(20)))
+        self.numeri = TextInput(font_size=sp(18), size_hint_y=None, height=dp(84),
                                 input_filter=lambda t, _: "".join(
                                     c for c in t if c.isdigit() or c in "+ ,;\n"))
         box.add_widget(self.numeri)
 
-        box.add_widget(etichetta("Manda un SMS:", 14, True, halign="left", altezza=dp(24)))
-        self.interruttori = {}
-        for chiave, testo in self.VOCI:
-            r = BoxLayout(size_hint_y=None, height=dp(58), spacing=dp(8))
-            l = etichetta(testo, 15, halign="left")
-            l.size_hint_y = 1
-            r.add_widget(l)
-            b = bottone("", GRIGIO, 17, dp(58), lambda k=chiave: self._cambia(k))
-            b.size_hint_x = None
-            b.width = dp(96)
-            r.add_widget(b)
-            self.interruttori[chiave] = b
-            box.add_widget(r)
-
-        r = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
-        l = etichetta("Rinvii prima dell'avviso", 15, halign="left")
-        l.size_hint_y = 1
-        r.add_widget(l)
-        r.add_widget(bottone("-", GRIGIO, 24, dp(52), lambda: self._rinvii(-1)))
-        self.lbl_rinvii = etichetta("3", 24, True, altezza=dp(52))
-        self.lbl_rinvii.size_hint_x = None
-        self.lbl_rinvii.width = dp(44)
-        r.add_widget(self.lbl_rinvii)
-        r.add_widget(bottone("+", GRIGIO, 24, dp(52), lambda: self._rinvii(1)))
+        # --- Telegram ---
+        self._titolo(box, "TELEGRAM (gratis, serve internet)")
+        self._interruttore(box, "telegram_attivo", "Manda gli avvisi su Telegram")
+        box.add_widget(etichetta("Codice del bot (lo dà @BotFather)", 13, halign="left",
+                                 altezza=dp(20)))
+        self.token = TextInput(font_size=sp(14), size_hint_y=None, height=dp(62),
+                               hint_text="es. 123456789:AAH...")
+        box.add_widget(self.token)
+        box.add_widget(etichetta("Familiari collegati", 13, halign="left", altezza=dp(20)))
+        self.lbl_chat = etichetta("", 15, halign="left")
+        box.add_widget(self.lbl_chat)
+        box.add_widget(etichetta("Ogni familiare apre il bot su Telegram e preme AVVIA,\n"
+                                 "poi qui si tocca «Cerca familiari».", 12, colore=GRIGIO))
+        r = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(8))
+        r.add_widget(bottone("Cerca familiari", BLU, 16, dp(50), self.cerca))
+        r.add_widget(bottone("Svuota elenco", GRIGIO, 15, dp(50), self.svuota_chat))
         box.add_widget(r)
 
+        # --- azioni ---
         box.add_widget(etichetta("", 4, altezza=dp(6)))
         r = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(8))
         r.add_widget(bottone("SALVA", VERDE, 19, dp(56), self.salva))
-        r.add_widget(bottone("SMS di prova", ARANCIO, 16, dp(56), self.prova))
+        r.add_widget(bottone("Messaggio di prova", ARANCIO, 15, dp(56), self.prova))
         box.add_widget(r)
         box.add_widget(bottone("Indietro", GRIGIO, 17, dp(50),
                                lambda: App.get_running_app().vai("gestione")))
 
-        box.add_widget(etichetta("Ultimi SMS", 14, True, halign="left", altezza=dp(26)))
-        self.ultimi = etichetta("", 13, colore=GRIGIO, halign="left")
+        box.add_widget(etichetta("Ultimi avvisi", 14, True, halign="left", altezza=dp(26)))
+        self.ultimi = etichetta("", 12, colore=GRIGIO, halign="left")
         box.add_widget(self.ultimi)
 
         scroll.add_widget(box)
@@ -1169,8 +1328,9 @@ class SchermataAvvisi(Screen):
 
     def on_pre_enter(self, *_):
         app = App.get_running_app()
-        self.dati = dict(app.avvisi)
+        self.dati = json.loads(json.dumps(app.avvisi))
         self.numeri.text = "\n".join(self.dati["numeri"])
+        self.token.text = self.dati.get("token", "")
         self._aggiorna()
 
     def _aggiorna(self):
@@ -1179,7 +1339,10 @@ class SchermataAvvisi(Screen):
             b.text = "SÌ" if acceso else "NO"
             b.background_color = hexc(VERDE if acceso else "#B0B0B0")
         self.lbl_rinvii.text = str(self.dati.get("rimandi_max", 3))
-        self.ultimi.text = App.get_running_app().ultimi_sms() or "Nessun SMS inviato."
+        chat = self.dati.get("chat", [])
+        self.lbl_chat.text = ("\n".join(f"• {c['nome']}" for c in chat) if chat
+                              else "nessuno")
+        self.ultimi.text = App.get_running_app().ultimi_avvisi() or "Nessun avviso inviato."
 
     def _cambia(self, k):
         self.dati[k] = not self.dati.get(k)
@@ -1189,31 +1352,73 @@ class SchermataAvvisi(Screen):
         self.dati["rimandi_max"] = max(2, min(9, self.dati.get("rimandi_max", 3) + delta))
         self._aggiorna()
 
-    def salva(self):
+    def _leggi_campi(self):
         self.dati["numeri"] = pulisci_numeri(self.numeri.text)
         self.numeri.text = "\n".join(self.dati["numeri"])
+        self.dati["token"] = "".join(self.token.text.split())
+        self.token.text = self.dati["token"]
+
+    def cerca(self):
+        self._leggi_campi()
+        if not self.dati["token"]:
+            avviso("Attenzione", "Scrivi prima il codice del bot.")
+            return
+        self.lbl_chat.text = "Cerco…"
+
+        def lavoro():
+            trovate, errore = cerca_chat_telegram(self.dati["token"])
+            Clock.schedule_once(lambda _: self._chat_trovate(trovate, errore))
+        threading.Thread(target=lavoro, daemon=True).start()
+
+    def _chat_trovate(self, trovate, errore):
+        if errore:
+            self._aggiorna()
+            avviso("Telegram", f"Non riesco a collegarmi:\n{errore}")
+            return
+        gia = {c["id"] for c in self.dati.get("chat", [])}
+        nuove = [c for c in trovate if c["id"] not in gia]
+        self.dati["chat"] = self.dati.get("chat", []) + nuove
+        self._aggiorna()
+        if nuove:
+            avviso("Telegram", "Trovati:\n" + "\n".join(c["nome"] for c in nuove) +
+                   "\n\nRicorda di premere SALVA.")
+        else:
+            avviso("Telegram", "Nessun nuovo familiare.\nChiedi di aprire il bot su Telegram,\n"
+                               "premere AVVIA e poi riprova.")
+
+    def svuota_chat(self):
+        self.dati["chat"] = []
+        self._aggiorna()
+
+    def salva(self):
+        self._leggi_campi()
         app = App.get_running_app()
-        app.avvisi = dict(self.dati)
+        app.avvisi = json.loads(json.dumps(self.dati))
         app.salva_avvisi()
-        chiedi_permesso_sms()
-        n = len(self.dati["numeri"])
-        avviso("Salvato", f"Avvisi salvati.\nNumeri: {n}" if n else
-               "Salvato, ma non c'è nessun numero:\nnon partirà nessun SMS.")
+        if self.dati.get("sms_attivo") and self.dati["numeri"]:
+            chiedi_permesso_sms()
+        canali = []
+        if self.dati.get("sms_attivo") and self.dati["numeri"]:
+            canali.append(f"SMS a {len(self.dati['numeri'])} numeri")
+        if self.dati.get("telegram_attivo") and self.dati["token"] and self.dati.get("chat"):
+            canali.append(f"Telegram a {len(self.dati['chat'])} familiari")
+        avviso("Salvato", "Avvisi salvati.\n" + ("\n".join(canali) if canali else
+                                                  "Attenzione: nessun canale attivo,\n"
+                                                  "non partirà nessun avviso."))
 
     def prova(self):
-        numeri = pulisci_numeri(self.numeri.text)
-        if not numeri:
-            avviso("Attenzione", "Scrivi almeno un numero di telefono.")
-            return
+        self._leggi_campi()
         app = App.get_running_app()
-        esiti = [app.manda_sms(n, "Promemoria Medicine: questo è un SMS di prova. "
-                                  "Gli avvisi funzionano.") for n in numeri]
-        self._aggiorna()
-        if all(esiti):
-            avviso("SMS di prova", f"SMS inviato a {len(numeri)} numer{'o' if len(numeri) == 1 else 'i'}.")
+        n = app.manda_avviso("Promemoria Medicine: questo è un messaggio di prova. "
+                             "Gli avvisi funzionano.", self.dati)
+        if n == 0:
+            avviso("Prova", "Nessun canale attivo con destinatari:\n"
+                            "metti SÌ su SMS o Telegram e aggiungi i destinatari.")
         else:
-            avviso("SMS di prova", "Qualche SMS non è partito.\nControlla la SIM, il credito\n"
-                                   "e il permesso «SMS» dell'app.")
+            avviso("Prova", f"Inviati {n} messaggi.\nTra qualche secondo l'esito\n"
+                            f"compare in «Ultimi avvisi».")
+        Clock.schedule_once(lambda _: self._aggiorna(), 6)
+        self._aggiorna()
 
 
 # =====================================================
@@ -1266,7 +1471,9 @@ class PromemoriaApp(App):
         self.file_reg = os.path.join(cartella, "registro.csv")
         self.file_persone = os.path.join(cartella, "persone.json")
         self.file_avvisi = os.path.join(cartella, "avvisi.json")
-        self.file_sms = os.path.join(cartella, "sms_inviati.txt")
+        self.file_sms = os.path.join(cartella, "avvisi_inviati.txt")
+        self.lock_log = threading.Lock()
+        self._risveglio = None
         self.avvisi = carica_avvisi(self.file_avvisi)
         self.conta_rinvii = {}
         self.cartella_media = os.path.join(cartella, "media")
@@ -1300,14 +1507,47 @@ class PromemoriaApp(App):
         self.principale.aggiorna_lista()
         Clock.schedule_once(lambda _: self.controlla(), 2)
         Clock.schedule_interval(lambda _: self.controlla(), 15)
-        tieni_schermo_acceso()
+        self.applica_schermo()
+        self.programma_prossima()
         return self.sm
 
     def on_pause(self):
+        self.programma_prossima(forza=True)
         return True
 
     def on_resume(self):
-        tieni_schermo_acceso()
+        self.applica_schermo()
+        Clock.schedule_once(lambda _: self.controlla(), 0.5)   # se ci ha svegliato la sveglia
+
+    def applica_schermo(self):
+        imposta_schermo(bool(self.allarme) or self.avvisi.get("schermo_sempre_acceso", True))
+
+    # ---- sveglia di sistema: riaccende il telefono anche in standby ----
+    def prossima_sveglia(self):
+        adesso = dt.datetime.now()
+        candidati = []
+        for m in self.medicine:
+            for o in m["orari"]:
+                h, mi = map(int, o.split(":"))
+                for giorni in (0, 1):
+                    t = (adesso + dt.timedelta(days=giorni)).replace(
+                        hour=h, minute=mi, second=0, microsecond=0)
+                    k = (m["id"], o, t.date().isoformat())
+                    if self.stato.get(k) in ("presa", "non confermata"):
+                        continue
+                    if k in self.rimandi:
+                        t = max(t, self.rimandi[k])
+                    if t > adesso:
+                        candidati.append(t)
+                        break
+        return min(candidati) if candidati else None
+
+    def programma_prossima(self, forza=False):
+        t = self.prossima_sveglia()
+        if t is None or (t == self._risveglio and not forza):
+            return
+        if programma_risveglio(int(t.timestamp() * 1000)):
+            self._risveglio = t
 
     # ---- navigazione ----
     def vai(self, nome):
@@ -1322,31 +1562,58 @@ class PromemoriaApp(App):
     def salva(self):
         salva_medicine(self.file_med, self.medicine)
         self.principale.aggiorna_lista()
+        self.programma_prossima()
 
-    # ---- SMS ai familiari ----
+    # ---- avvisi ai familiari (SMS e Telegram) ----
     def salva_avvisi(self):
         salva_medicine(self.file_avvisi, self.avvisi)
 
+    def _scrivi_log(self, canale, dest, ok, motivo, testo):
+        riga = (f"{dt.datetime.now():%d/%m %H:%M}  {canale} {dest}  "
+                f"{'inviato' if ok else 'NON inviato: ' + motivo}  |  {testo}")
+        with self.lock_log:
+            try:
+                with open(self.file_sms, "a", encoding="utf-8") as f:
+                    f.write(riga + "\n")
+            except Exception:
+                pass
+
     def manda_sms(self, numero, testo):
         ok, motivo = invia_sms(numero, testo)
-        riga = (f"{dt.datetime.now():%d/%m %H:%M}  {numero}  "
-                f"{'inviato' if ok else 'NON inviato: ' + motivo}  |  {testo}")
-        try:
-            with open(self.file_sms, "a", encoding="utf-8") as f:
-                f.write(riga + "\n")
-        except Exception:
-            pass
+        self._scrivi_log("SMS", numero, ok, motivo, testo)
         return ok
 
-    def ultimi_sms(self, quanti=8):
+    def manda_telegram(self, token, chat, testo):
+        """In un thread separato: la rete può essere lenta e l'app non deve bloccarsi."""
+        def lavoro():
+            ok, motivo = invia_telegram(token, chat["id"], testo)
+            self._scrivi_log("Telegram", chat["nome"], ok, motivo, testo)
+        threading.Thread(target=lavoro, daemon=True).start()
+
+    def manda_avviso(self, testo, impostazioni=None):
+        """Manda il testo su tutti i canali attivi. Restituisce quanti messaggi sono partiti."""
+        a = impostazioni or self.avvisi
+        n = 0
+        if a.get("sms_attivo"):
+            for numero in a.get("numeri", []):
+                self.manda_sms(numero, testo)
+                n += 1
+        if a.get("telegram_attivo") and a.get("token"):
+            for chat in a.get("chat", []):
+                self.manda_telegram(a["token"], chat, testo)
+                n += 1
+        return n
+
+    def ultimi_avvisi(self, quanti=8):
         if not os.path.exists(self.file_sms):
             return ""
-        with open(self.file_sms, encoding="utf-8") as f:
-            righe = f.read().strip().splitlines()
+        with self.lock_log:
+            with open(self.file_sms, encoding="utf-8") as f:
+                righe = f.read().strip().splitlines()
         return "\n".join(reversed(righe[-quanti:]))
 
     def avvisa_familiari(self, tipo, med, orario, extra=""):
-        if not self.avvisi.get(tipo) or not self.avvisi.get("numeri"):
+        if not self.avvisi.get(tipo):
             return
         nome = self._nome_persona(med) or "La persona"
         ora = dt.datetime.now().strftime("%H:%M")
@@ -1358,9 +1625,7 @@ class PromemoriaApp(App):
         else:
             testo = (f"ATTENZIONE: {nome} ha rimandato {extra} volte {med['nome']} "
                      f"delle {orario} (ultimo rinvio alle {ora}).")
-        testo = "Promemoria Medicine - " + testo
-        for numero in self.avvisi["numeri"]:
-            self.manda_sms(numero, testo)
+        self.manda_avviso("Promemoria Medicine - " + testo)
 
     def salva_persone(self):
         salva_medicine(self.file_persone, self.persone)
@@ -1424,10 +1689,12 @@ class PromemoriaApp(App):
             return
         self.allarme = Allarme(self, med, orario, chiave)
         self.allarme.open()
+        self.applica_schermo()
 
     # ---- risposte ----
     def esito(self, chiave, med, orario, esito):
         self.allarme = None
+        self.applica_schermo()
         self.rimandi.pop(chiave, None)
         if orario == "PROVA":
             if esito == "presa":
@@ -1438,6 +1705,7 @@ class PromemoriaApp(App):
         nome = self._nome_persona(med)
         registra(self.file_reg, med, orario, esito, nome)
         self.avvisa_familiari(esito.replace(" ", "_"), med, orario)
+        self.programma_prossima()
         if esito == "presa":
             self.voce.parla(f"Grazie {nome}!" if nome else "Grazie!")
         self.principale.aggiorna_lista()
@@ -1445,6 +1713,7 @@ class PromemoriaApp(App):
 
     def rimanda(self, chiave, med, orario):
         self.allarme = None
+        self.applica_schermo()
         if orario == "PROVA":
             return
         self.rimandi[chiave] = dt.datetime.now() + dt.timedelta(minutes=RIMANDA_MIN)
@@ -1453,6 +1722,7 @@ class PromemoriaApp(App):
         self.conta_rinvii[chiave] = n
         if n == self.avvisi.get("rimandi_max", 3):
             self.avvisa_familiari("rimandi", med, orario, n)
+        self.programma_prossima()
         self.voce.parla(f"Va bene, te lo ricordo tra {RIMANDA_MIN} minuti.")
         self.principale.aggiorna_lista()
 
