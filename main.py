@@ -60,6 +60,16 @@ ROSSO = "#B00020"
 GRIGIO = "#777777"
 TESTO = "#222222"
 
+# Colori disponibili per le persone: (forte, chiaro per le righe, sfondo della sveglia)
+PALETTE = {
+    "rosa":    ("#D6457A", "#FCE4EE", "#F9C9DC"),
+    "azzurro": ("#2C6FB7", "#E1EEFB", "#BFDCF7"),
+    "verde":   ("#2E9E44", "#E3F4E6", "#C5EBCB"),
+    "viola":   ("#7B4FB8", "#EEE6F8", "#DDCCF2"),
+    "arancio": ("#E07020", "#FDEEDF", "#FAD7B5"),
+    "giallo":  ("#B38F00", "#FFF6CC", "#FFE88A"),
+}
+
 GIORNI = ["lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"]
 MESI = ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio",
         "agosto", "settembre", "ottobre", "novembre", "dicembre"]
@@ -100,6 +110,63 @@ else:
 
     def chiedi_permessi(poi):
         poi()
+
+
+# =====================================================
+#  INVIO SMS
+# =====================================================
+def chiedi_permesso_sms():
+    if not ANDROID:
+        return True
+    try:
+        from android.permissions import Permission, check_permission, request_permissions
+        if check_permission(Permission.SEND_SMS):
+            return True
+        request_permissions([Permission.SEND_SMS])
+    except Exception as e:
+        print("Permesso SMS:", e)
+    return False
+
+
+def invia_sms(numero, testo):
+    """Invia un SMS. Restituisce (True, '') se partito, altrimenti (False, motivo)."""
+    if not ANDROID:
+        print(f"[SMS simulato a {numero}] {testo}")
+        return True, "simulato sul PC"
+    if not chiedi_permesso_sms():
+        return False, "permesso SMS non concesso"
+    try:
+        SmsManager = autoclass("android.telephony.SmsManager")
+        gestore = SmsManager.getDefault()
+        parti = gestore.divideMessage(testo)
+        if parti.size() > 1:
+            gestore.sendMultipartTextMessage(numero, None, parti, None, None)
+        else:
+            gestore.sendTextMessage(numero, None, testo, None, None)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def pulisci_numeri(testo):
+    numeri = []
+    for pezzo in testo.replace(";", ",").replace("\n", ",").split(","):
+        n = "".join(c for c in pezzo if c.isdigit() or c == "+")
+        if len(n) >= 6 and n not in numeri:
+            numeri.append(n)
+    return numeri
+
+
+AVVISI_PREDEFINITI = {"numeri": [], "presa": True, "non_confermata": True,
+                      "rimandi": True, "rimandi_max": 3}
+
+
+def carica_avvisi(percorso):
+    dati = dict(AVVISI_PREDEFINITI)
+    if os.path.exists(percorso):
+        with open(percorso, encoding="utf-8") as f:
+            dati.update(json.load(f))
+    return dati
 
 
 # =====================================================
@@ -212,14 +279,35 @@ class Voce:
 # =====================================================
 #  DATI
 # =====================================================
+def persone_esempio():
+    return [
+        {"id": "p1", "nome": "Caterina", "colore": "rosa"},
+        {"id": "p2", "nome": "Tommaso", "colore": "azzurro"},
+    ]
+
+
+def carica_persone(percorso):
+    if not os.path.exists(percorso):
+        persone = persone_esempio()
+        salva_medicine(percorso, persone)
+        return persone
+    with open(percorso, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def colori_di(persona):
+    """(forte, chiaro, sfondo sveglia) del colore scelto per la persona."""
+    return PALETTE.get((persona or {}).get("colore"), PALETTE["verde"])
+
+
 def medicine_esempio():
     return [
         {"id": str(uuid.uuid4()), "nome": "Pastiglia della pressione",
          "dose": "1 compressa con un bicchiere d'acqua", "orari": ["08:00", "20:00"],
-         "foto": "", "audio": "", "messaggio": ""},
+         "foto": "", "audio": "", "messaggio": "", "persona": "p1"},
         {"id": str(uuid.uuid4()), "nome": "Vitamina D",
          "dose": "10 gocce", "orari": ["13:00"],
-         "foto": "", "audio": "", "messaggio": ""},
+         "foto": "", "audio": "", "messaggio": "", "persona": "p2"},
     ]
 
 
@@ -239,15 +327,34 @@ def salva_medicine(percorso, meds):
     os.replace(tmp, percorso)
 
 
-def registra(percorso, med, orario, esito):
+INTESTAZIONE_REG = ["data", "ora_prevista", "ora_risposta", "medicina", "dose", "esito", "id",
+                    "persona"]
+
+
+def aggiorna_registro_vecchio(percorso):
+    """Il registro delle versioni precedenti non aveva la colonna 'persona': la aggiunge."""
+    if not os.path.exists(percorso):
+        return
+    with open(percorso, encoding="utf-8") as f:
+        righe = list(csv.reader(f, delimiter=";"))
+    if not righe or "persona" in righe[0]:
+        return
+    with open(percorso, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f, delimiter=";")
+        w.writerow(INTESTAZIONE_REG)
+        for r in righe[1:]:
+            w.writerow((r + [""] * 8)[:8])
+
+
+def registra(percorso, med, orario, esito, persona=""):
     nuovo = not os.path.exists(percorso)
     ora = dt.datetime.now()
     with open(percorso, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";")
         if nuovo:
-            w.writerow(["data", "ora_prevista", "ora_risposta", "medicina", "dose", "esito", "id"])
+            w.writerow(INTESTAZIONE_REG)
         w.writerow([ora.date().isoformat(), orario, ora.strftime("%H:%M"),
-                    med["nome"], med["dose"], esito, med["id"]])
+                    med["nome"], med["dose"], esito, med["id"], persona])
 
 
 def leggi_registro(percorso):
@@ -416,17 +523,24 @@ class TastoLungo(Button):
 # =====================================================
 class Allarme(ModalView):
     def __init__(self, app, med, orario, chiave, **kw):
+        self.persona = app.persona_di(med)
+        self.forte, _, self.fondo = colori_di(self.persona)
         super().__init__(size_hint=(1, 1), auto_dismiss=False,
-                         background="", background_color=hexc(BG_ALLARME), **kw)
+                         background="", background_color=hexc(self.fondo), **kw)
         self.app, self.med, self.orario, self.chiave = app, med, orario, chiave
         self.inizio = dt.datetime.now()
         self.acceso = True
         self.ev_parla = None
 
         box = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(10))
-        sfondo(box, BG_ALLARME)
+        sfondo(box, self.fondo)
 
-        self.titolo = etichetta("È L'ORA DELLA MEDICINA", 30, True, ROSSO)
+        if self.persona:
+            fascia = Label(text=self.persona["nome"].upper(), font_size=sp(40), bold=True,
+                           color=(1, 1, 1, 1), size_hint_y=None, height=dp(70))
+            sfondo(fascia, self.forte)
+            box.add_widget(fascia)
+        self.titolo = etichetta("È L'ORA DELLA MEDICINA", 28, True, ROSSO)
         box.add_widget(self.titolo)
         if orario != "PROVA":
             box.add_widget(etichetta(f"ore {orario}", 24))
@@ -454,8 +568,10 @@ class Allarme(ModalView):
         Clock.schedule_once(lambda _: self._annuncia(), 0.3)
 
     def messaggio(self):
-        return (self.med.get("messaggio") or
-                f"È ora di prendere {self.med['nome']}. {self.med['dose']}. "
+        if self.med.get("messaggio"):
+            return self.med["messaggio"]
+        nome = f"{self.persona['nome']}, " if self.persona else ""
+        return (f"{nome}è ora di prendere {self.med['nome']}. {self.med['dose']}. "
                 f"Quando l'hai presa, premi il pulsante verde.")
 
     def annuncia_una_volta(self):
@@ -474,7 +590,7 @@ class Allarme(ModalView):
 
     def _lampeggia(self):
         self.acceso = not self.acceso
-        self.titolo.color = hexc(ROSSO) if self.acceso else hexc(BG_ALLARME)
+        self.titolo.color = hexc(ROSSO) if self.acceso else hexc(self.fondo)
 
     def _ferma(self):
         self.ev_voce.cancel()
@@ -535,40 +651,58 @@ class SchermataPrincipale(Screen):
         self.lista.clear_widgets()
         oggi = dt.date.today().isoformat()
         adesso = dt.datetime.now().strftime("%H:%M")
-        righe = sorted(((o, m) for m in app.medicine for o in m["orari"]), key=lambda x: x[0])
-        if not righe:
+        if not app.medicine:
             self.lista.add_widget(etichetta("Nessuna medicina impostata", 20))
-        for orario, m in righe:
-            k = (m["id"], orario, oggi)
-            esito = app.stato.get(k)
-            if esito == "presa":
-                stato, colore = "PRESA", VERDE
-            elif esito == "non confermata":
-                stato, colore = "NON\nCONFERMATA", ROSSO
-            elif k in app.rimandi:
-                stato, colore = "TRA POCO", ARANCIO
-            elif orario > adesso:
-                stato, colore = "da prendere", GRIGIO
-            else:
-                stato, colore = "", GRIGIO
-            riga = BoxLayout(size_hint_y=None, height=dp(78), spacing=dp(6),
-                             padding=(0, dp(4)))
-            sfondo(riga, "#FFFFFF")
-            o = etichetta(orario, 26, True)
-            o.size_hint_y = 1
-            o.size_hint_x = 0.27
-            n = etichetta(f"{m['nome']}\n[size={int(sp(15))}]{m['dose']}[/size]", 19,
-                          halign="left")
-            n.markup = True
-            n.size_hint_x = 0.48
-            n.bind(height=lambda i, h, riga=riga: setattr(riga, "height", max(dp(78), h + dp(8))))
-            s = etichetta(stato, 15, True, colore)
-            s.size_hint_y = 1
-            s.size_hint_x = 0.25
-            riga.add_widget(o)
-            riga.add_widget(n)
-            riga.add_widget(s)
-            self.lista.add_widget(riga)
+            return
+        # un gruppo per ogni persona, nell'ordine dell'elenco persone; poi le medicine senza persona
+        gruppi = [(p, [m for m in app.medicine if m.get("persona") == p["id"]])
+                  for p in app.persone]
+        ids = {p["id"] for p in app.persone}
+        gruppi.append((None, [m for m in app.medicine if m.get("persona") not in ids]))
+        for persona, meds in gruppi:
+            if not meds:
+                continue
+            forte, chiaro, _ = colori_di(persona)
+            if persona:
+                fascia = Label(text=persona["nome"].upper(), font_size=sp(22), bold=True,
+                               color=(1, 1, 1, 1), size_hint_y=None, height=dp(40))
+                sfondo(fascia, forte)
+                self.lista.add_widget(fascia)
+            righe = sorted(((o, m) for m in meds for o in m["orari"]), key=lambda x: x[0])
+            for orario, m in righe:
+                self.lista.add_widget(self._riga(app, orario, m, oggi, adesso, forte, chiaro))
+            self.lista.add_widget(Label(size_hint_y=None, height=dp(6)))
+
+    def _riga(self, app, orario, m, oggi, adesso, forte, chiaro):
+        k = (m["id"], orario, oggi)
+        esito = app.stato.get(k)
+        if esito == "presa":
+            stato, colore = "PRESA", VERDE
+        elif esito == "non confermata":
+            stato, colore = "NON\nCONFERMATA", ROSSO
+        elif k in app.rimandi:
+            stato, colore = "TRA POCO", ARANCIO
+        elif orario > adesso:
+            stato, colore = "da prendere", GRIGIO
+        else:
+            stato, colore = "", GRIGIO
+        riga = BoxLayout(size_hint_y=None, height=dp(72), spacing=dp(6), padding=(0, dp(4)))
+        sfondo(riga, chiaro)
+        striscia = Label(size_hint=(None, 1), width=dp(8))
+        sfondo(striscia, forte)
+        o = etichetta(orario, 24, True, forte)
+        o.size_hint_y = 1
+        o.size_hint_x = 0.25
+        n = etichetta(f"{m['nome']}\n[size={int(sp(14))}]{m['dose']}[/size]", 18, halign="left")
+        n.markup = True
+        n.size_hint_x = 0.48
+        n.bind(height=lambda i, h, riga=riga: setattr(riga, "height", max(dp(72), h + dp(8))))
+        st = etichetta(stato, 14, True, colore)
+        st.size_hint_y = 1
+        st.size_hint_x = 0.25
+        for w in (striscia, o, n, st):
+            riga.add_widget(w)
+        return riga
 
 
 # =====================================================
@@ -587,17 +721,27 @@ class SchermataGestione(Screen):
         scroll.add_widget(self.lista)
         box.add_widget(scroll)
         app = App.get_running_app()
-        box.add_widget(bottone("+ Aggiungi medicina", VERDE, azione=lambda: app.modifica(None)))
-        box.add_widget(bottone("Storico", BLU, azione=lambda: app.vai("storico")))
-        box.add_widget(bottone("Torna all'orologio", GRIGIO, azione=lambda: app.vai("principale")))
+        box.add_widget(bottone("+ Aggiungi medicina", VERDE, 20, dp(60),
+                               lambda: app.modifica(None)))
+        r = BoxLayout(size_hint_y=None, height=dp(60), spacing=dp(8))
+        r.add_widget(bottone("Persone", "#7B4FB8", 20, dp(60), lambda: app.vai("persone")))
+        r.add_widget(bottone("Storico", BLU, 20, dp(60), lambda: app.vai("storico")))
+        box.add_widget(r)
+        box.add_widget(bottone("Avvisi SMS ai familiari", "#00897B", 20, dp(60),
+                               lambda: app.vai("avvisi")))
+        box.add_widget(bottone("Torna all'orologio", GRIGIO, 20, dp(60),
+                               lambda: app.vai("principale")))
         self.add_widget(box)
 
     def on_pre_enter(self, *_):
         app = App.get_running_app()
         self.lista.clear_widgets()
         for i, m in enumerate(app.medicine):
-            self.lista.add_widget(bottone(f"{m['nome']}\n{', '.join(m['orari'])}", "#5A5A5A",
-                                          19, dp(78), lambda i=i: app.modifica(i)))
+            persona = app.persona_di(m)
+            chi = persona["nome"] if persona else "nessuna persona"
+            forte = colori_di(persona)[0] if persona else "#5A5A5A"
+            self.lista.add_widget(bottone(f"{m['nome']}  ({chi})\n{', '.join(m['orari'])}",
+                                          forte, 18, dp(72), lambda i=i: app.modifica(i)))
 
 
 # =====================================================
@@ -632,6 +776,12 @@ class SchermataModifica(Screen):
                            height=dp(62) if alto else dp(40), padding=(dp(8), dp(8)))
             box.add_widget(ti)
             self.campi[chiave] = ti
+
+        # --- persona: un pulsante per ogni persona ---
+        box.add_widget(etichetta("Per chi è", 13, True, halign="left", altezza=dp(20)))
+        self.riga_persone = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+        box.add_widget(self.riga_persone)
+        self.persona_id = None
 
         # --- foto: anteprima a sinistra, pulsanti a destra ---
         box.add_widget(etichetta("Foto della medicina", 13, True, halign="left", altezza=dp(20)))
@@ -689,9 +839,31 @@ class SchermataModifica(Screen):
         self.campi["messaggio"].text = m.get("messaggio", "")
         self.foto = m.get("foto", "")
         self.audio = m.get("audio", "")
+        ids = [p["id"] for p in app.persone]
+        self.persona_id = m.get("persona") if m.get("persona") in ids else (ids[0] if ids else None)
         self._mostra()
 
+    def _disegna_persone(self):
+        app = App.get_running_app()
+        self.riga_persone.clear_widgets()
+        if not app.persone:
+            self.riga_persone.add_widget(etichetta("Aggiungi le persone dalle Impostazioni", 13,
+                                                   colore=GRIGIO, altezza=dp(44)))
+        for p in app.persone:
+            forte, chiaro, _ = colori_di(p)
+            scelta = p["id"] == self.persona_id
+            b = bottone(("• " + p["nome"] + " •") if scelta else p["nome"], forte if scelta else chiaro,
+                        15, dp(44), lambda pid=p["id"]: self._scegli_persona(pid))
+            if not scelta:
+                b.color = hexc(forte)
+            self.riga_persone.add_widget(b)
+
+    def _scegli_persona(self, pid):
+        self.persona_id = pid
+        self._disegna_persone()
+
     def _mostra(self):
+        self._disegna_persone()
         ce_foto = bool(self.foto and os.path.exists(self.foto))
         self.cornice.clear_widgets()
         if ce_foto:
@@ -746,7 +918,7 @@ class SchermataModifica(Screen):
             return None
         return {"nome": nome, "dose": self.campi["dose"].text.strip(), "orari": orari,
                 "messaggio": self.campi["messaggio"].text.strip(),
-                "foto": self.foto, "audio": self.audio}
+                "foto": self.foto, "audio": self.audio, "persona": self.persona_id}
 
     def salva(self):
         dati = self._dati()
@@ -794,6 +966,257 @@ class SchermataModifica(Screen):
 
 
 # =====================================================
+#  IMPOSTAZIONI: PERSONE
+# =====================================================
+class SchermataPersone(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+        sfondo(box, BG)
+        box.add_widget(etichetta("Persone", 28, True))
+        box.add_widget(etichetta("Tocca una persona per cambiarle nome o colore", 15,
+                                 colore=GRIGIO))
+        scroll = ScrollView()
+        self.lista = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(6))
+        self.lista.bind(minimum_height=self.lista.setter("height"))
+        scroll.add_widget(self.lista)
+        box.add_widget(scroll)
+        app = App.get_running_app()
+        box.add_widget(bottone("+ Aggiungi persona", VERDE, 20, dp(60),
+                               lambda: app.modifica_persona(None)))
+        box.add_widget(bottone("Indietro", GRIGIO, 20, dp(60), lambda: app.vai("gestione")))
+        self.add_widget(box)
+
+    def on_pre_enter(self, *_):
+        app = App.get_running_app()
+        self.lista.clear_widgets()
+        for i, p in enumerate(app.persone):
+            n = sum(1 for m in app.medicine if m.get("persona") == p["id"])
+            self.lista.add_widget(bottone(f"{p['nome']}\n{n} medicin{'a' if n == 1 else 'e'}",
+                                          colori_di(p)[0], 20, dp(72),
+                                          lambda i=i: app.modifica_persona(i)))
+
+
+class SchermataPersona(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.indice = None
+        self.colore = "rosa"
+        box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+        self.fondo = sfondo(box, BG)
+        self.titolo = etichetta("Persona", 26, True)
+        box.add_widget(self.titolo)
+        box.add_widget(etichetta("Nome", 15, halign="left", altezza=dp(22)))
+        self.nome = TextInput(multiline=False, font_size=sp(22), size_hint_y=None, height=dp(52))
+        box.add_widget(self.nome)
+        box.add_widget(etichetta("Colore", 15, halign="left", altezza=dp(22)))
+        self.griglia = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(126),
+                                 spacing=dp(6))
+        box.add_widget(self.griglia)
+        box.add_widget(etichetta("Anteprima", 15, halign="left", altezza=dp(22)))
+        self.anteprima = Label(font_size=sp(22), bold=True, color=(1, 1, 1, 1),
+                               size_hint_y=None, height=dp(44))
+        self.sfondo_anteprima = sfondo(self.anteprima, "#888888")
+        box.add_widget(self.anteprima)
+        self.riga_anteprima = Label(text="08:00   Medicina di esempio", font_size=sp(17),
+                                    size_hint_y=None, height=dp(50))
+        self.sfondo_riga = sfondo(self.riga_anteprima, "#FFFFFF")
+        box.add_widget(self.riga_anteprima)
+        box.add_widget(BoxLayout())
+        app = App.get_running_app()
+        box.add_widget(bottone("SALVA", VERDE, 20, dp(58), self.salva))
+        r = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
+        r.add_widget(bottone("Elimina", ROSSO, 17, dp(52), self.elimina))
+        r.add_widget(bottone("Indietro", GRIGIO, 17, dp(52), lambda: app.vai("persone")))
+        box.add_widget(r)
+        self.nome.bind(text=lambda *_: self._aggiorna())
+        self.add_widget(box)
+
+    def carica(self, indice):
+        app = App.get_running_app()
+        self.indice = indice
+        if indice is None:
+            usati = {p.get("colore") for p in app.persone}
+            liberi = [c for c in PALETTE if c not in usati]
+            self.colore = liberi[0] if liberi else "verde"
+            self.nome.text = ""
+            self.titolo.text = "Nuova persona"
+        else:
+            p = app.persone[indice]
+            self.colore = p.get("colore", "verde")
+            self.nome.text = p["nome"]
+            self.titolo.text = "Modifica persona"
+        self._aggiorna()
+
+    def _aggiorna(self):
+        self.griglia.clear_widgets()
+        nomi = list(PALETTE)
+        for riga in (nomi[:3], nomi[3:]):
+            r = BoxLayout(spacing=dp(6))
+            for c in riga:
+                forte = PALETTE[c][0]
+                r.add_widget(bottone(("• " + c + " •") if c == self.colore else c, forte, 17, dp(60),
+                                     lambda c=c: self._scegli(c)))
+            self.griglia.add_widget(r)
+        forte, chiaro, _ = PALETTE[self.colore]
+        self.anteprima.text = (self.nome.text.strip() or "Nome").upper()
+        self.sfondo_anteprima.rgba = hexc(forte)
+        self.sfondo_riga.rgba = hexc(chiaro)
+        self.riga_anteprima.color = hexc(forte)
+
+    def _scegli(self, c):
+        self.colore = c
+        self._aggiorna()
+
+    def salva(self):
+        nome = self.nome.text.strip()
+        if not nome:
+            avviso("Attenzione", "Scrivi il nome della persona.")
+            return
+        app = App.get_running_app()
+        if self.indice is None:
+            app.persone.append({"id": uuid.uuid4().hex[:8], "nome": nome, "colore": self.colore})
+            self.indice = len(app.persone) - 1
+        else:
+            app.persone[self.indice].update({"nome": nome, "colore": self.colore})
+        app.salva_persone()
+        avviso("Salvato", f"«{nome}» è stata salvata.")
+
+    def elimina(self):
+        app = App.get_running_app()
+        if self.indice is None:
+            app.vai("persone")
+            return
+        p = app.persone[self.indice]
+        n = sum(1 for m in app.medicine if m.get("persona") == p["id"])
+        if n:
+            avviso("Non si può eliminare",
+                   f"{p['nome']} ha ancora {n} medicin{'a' if n == 1 else 'e'}.\n"
+                   f"Prima eliminale o assegnale a un'altra persona.")
+            return
+        del app.persone[self.indice]
+        app.salva_persone()
+        app.vai("persone")
+
+
+# =====================================================
+#  IMPOSTAZIONI: AVVISI SMS
+# =====================================================
+class SchermataAvvisi(Screen):
+    VOCI = [
+        ("presa", "Quando una dose viene presa"),
+        ("non_confermata", f"Quando una dose NON è confermata\n(nessuna risposta in {TIMEOUT_MIN} minuti)"),
+        ("rimandi", "Quando una dose viene rimandata\npiù volte di seguito"),
+    ]
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        esterno = BoxLayout()
+        sfondo(esterno, BG)
+        scroll = ScrollView()
+        box = BoxLayout(orientation="vertical", size_hint_y=None, padding=dp(12), spacing=dp(6))
+        box.bind(minimum_height=box.setter("height"))
+
+        box.add_widget(etichetta("Avvisi SMS ai familiari", 24, True))
+        box.add_widget(etichetta("Numeri a cui mandare gli SMS (uno per riga)", 14,
+                                 halign="left", altezza=dp(22)))
+        self.numeri = TextInput(font_size=sp(19), size_hint_y=None, height=dp(96),
+                                input_filter=lambda t, _: "".join(
+                                    c for c in t if c.isdigit() or c in "+ ,;\n"))
+        box.add_widget(self.numeri)
+
+        box.add_widget(etichetta("Manda un SMS:", 14, True, halign="left", altezza=dp(24)))
+        self.interruttori = {}
+        for chiave, testo in self.VOCI:
+            r = BoxLayout(size_hint_y=None, height=dp(58), spacing=dp(8))
+            l = etichetta(testo, 15, halign="left")
+            l.size_hint_y = 1
+            r.add_widget(l)
+            b = bottone("", GRIGIO, 17, dp(58), lambda k=chiave: self._cambia(k))
+            b.size_hint_x = None
+            b.width = dp(96)
+            r.add_widget(b)
+            self.interruttori[chiave] = b
+            box.add_widget(r)
+
+        r = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
+        l = etichetta("Rinvii prima dell'avviso", 15, halign="left")
+        l.size_hint_y = 1
+        r.add_widget(l)
+        r.add_widget(bottone("-", GRIGIO, 24, dp(52), lambda: self._rinvii(-1)))
+        self.lbl_rinvii = etichetta("3", 24, True, altezza=dp(52))
+        self.lbl_rinvii.size_hint_x = None
+        self.lbl_rinvii.width = dp(44)
+        r.add_widget(self.lbl_rinvii)
+        r.add_widget(bottone("+", GRIGIO, 24, dp(52), lambda: self._rinvii(1)))
+        box.add_widget(r)
+
+        box.add_widget(etichetta("", 4, altezza=dp(6)))
+        r = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(8))
+        r.add_widget(bottone("SALVA", VERDE, 19, dp(56), self.salva))
+        r.add_widget(bottone("SMS di prova", ARANCIO, 16, dp(56), self.prova))
+        box.add_widget(r)
+        box.add_widget(bottone("Indietro", GRIGIO, 17, dp(50),
+                               lambda: App.get_running_app().vai("gestione")))
+
+        box.add_widget(etichetta("Ultimi SMS", 14, True, halign="left", altezza=dp(26)))
+        self.ultimi = etichetta("", 13, colore=GRIGIO, halign="left")
+        box.add_widget(self.ultimi)
+
+        scroll.add_widget(box)
+        esterno.add_widget(scroll)
+        self.add_widget(esterno)
+
+    def on_pre_enter(self, *_):
+        app = App.get_running_app()
+        self.dati = dict(app.avvisi)
+        self.numeri.text = "\n".join(self.dati["numeri"])
+        self._aggiorna()
+
+    def _aggiorna(self):
+        for k, b in self.interruttori.items():
+            acceso = self.dati.get(k)
+            b.text = "SÌ" if acceso else "NO"
+            b.background_color = hexc(VERDE if acceso else "#B0B0B0")
+        self.lbl_rinvii.text = str(self.dati.get("rimandi_max", 3))
+        self.ultimi.text = App.get_running_app().ultimi_sms() or "Nessun SMS inviato."
+
+    def _cambia(self, k):
+        self.dati[k] = not self.dati.get(k)
+        self._aggiorna()
+
+    def _rinvii(self, delta):
+        self.dati["rimandi_max"] = max(2, min(9, self.dati.get("rimandi_max", 3) + delta))
+        self._aggiorna()
+
+    def salva(self):
+        self.dati["numeri"] = pulisci_numeri(self.numeri.text)
+        self.numeri.text = "\n".join(self.dati["numeri"])
+        app = App.get_running_app()
+        app.avvisi = dict(self.dati)
+        app.salva_avvisi()
+        chiedi_permesso_sms()
+        n = len(self.dati["numeri"])
+        avviso("Salvato", f"Avvisi salvati.\nNumeri: {n}" if n else
+               "Salvato, ma non c'è nessun numero:\nnon partirà nessun SMS.")
+
+    def prova(self):
+        numeri = pulisci_numeri(self.numeri.text)
+        if not numeri:
+            avviso("Attenzione", "Scrivi almeno un numero di telefono.")
+            return
+        app = App.get_running_app()
+        esiti = [app.manda_sms(n, "Promemoria Medicine: questo è un SMS di prova. "
+                                  "Gli avvisi funzionano.") for n in numeri]
+        self._aggiorna()
+        if all(esiti):
+            avviso("SMS di prova", f"SMS inviato a {len(numeri)} numer{'o' if len(numeri) == 1 else 'i'}.")
+        else:
+            avviso("SMS di prova", "Qualche SMS non è partito.\nControlla la SIM, il credito\n"
+                                   "e il permesso «SMS» dell'app.")
+
+
+# =====================================================
 #  IMPOSTAZIONI: STORICO
 # =====================================================
 class SchermataStorico(Screen):
@@ -821,7 +1244,8 @@ class SchermataStorico(Screen):
             except ValueError:
                 giorno = r["data"]
             col = colori.get(r["esito"], GRIGIO).lstrip("#")
-            righe.append(f"{giorno}  ore {r['ora_prevista']}  {r['medicina']}\n"
+            chi = f"[b]{r['persona']}[/b] - " if r.get("persona") else ""
+            righe.append(f"{giorno}  ore {r['ora_prevista']}  {chi}{r['medicina']}\n"
                          f"      [color={col}][b]{r['esito']}[/b][/color] alle {r['ora_risposta']}")
         self.testo.text = "\n".join(righe) if righe else "Nessuna registrazione."
 
@@ -840,11 +1264,23 @@ class PromemoriaApp(App):
         cartella = self.user_data_dir
         self.file_med = os.path.join(cartella, "medicine.json")
         self.file_reg = os.path.join(cartella, "registro.csv")
+        self.file_persone = os.path.join(cartella, "persone.json")
+        self.file_avvisi = os.path.join(cartella, "avvisi.json")
+        self.file_sms = os.path.join(cartella, "sms_inviati.txt")
+        self.avvisi = carica_avvisi(self.file_avvisi)
+        self.conta_rinvii = {}
         self.cartella_media = os.path.join(cartella, "media")
         os.makedirs(self.cartella_media, exist_ok=True)
 
         self.voce = Voce(cartella)
+        self.persone = carica_persone(self.file_persone)
         self.medicine = carica_medicine(self.file_med)
+        # medicine delle versioni precedenti, senza persona: vanno alla prima persona
+        if self.persone and any("persona" not in m for m in self.medicine):
+            for m in self.medicine:
+                m.setdefault("persona", self.persone[0]["id"])
+            salva_medicine(self.file_med, self.medicine)
+        aggiorna_registro_vecchio(self.file_reg)
         self.stato = stato_di_oggi(self.file_reg)
         self.rimandi = {}
         self.allarme = None
@@ -856,6 +1292,10 @@ class PromemoriaApp(App):
         self.sm.add_widget(SchermataGestione(name="gestione"))
         self.sm.add_widget(self.modifica_scr)
         self.sm.add_widget(SchermataStorico(name="storico"))
+        self.sm.add_widget(SchermataAvvisi(name="avvisi"))
+        self.persona_scr = SchermataPersona(name="persona")
+        self.sm.add_widget(SchermataPersone(name="persone"))
+        self.sm.add_widget(self.persona_scr)
 
         self.principale.aggiorna_lista()
         Clock.schedule_once(lambda _: self.controlla(), 2)
@@ -882,6 +1322,63 @@ class PromemoriaApp(App):
     def salva(self):
         salva_medicine(self.file_med, self.medicine)
         self.principale.aggiorna_lista()
+
+    # ---- SMS ai familiari ----
+    def salva_avvisi(self):
+        salva_medicine(self.file_avvisi, self.avvisi)
+
+    def manda_sms(self, numero, testo):
+        ok, motivo = invia_sms(numero, testo)
+        riga = (f"{dt.datetime.now():%d/%m %H:%M}  {numero}  "
+                f"{'inviato' if ok else 'NON inviato: ' + motivo}  |  {testo}")
+        try:
+            with open(self.file_sms, "a", encoding="utf-8") as f:
+                f.write(riga + "\n")
+        except Exception:
+            pass
+        return ok
+
+    def ultimi_sms(self, quanti=8):
+        if not os.path.exists(self.file_sms):
+            return ""
+        with open(self.file_sms, encoding="utf-8") as f:
+            righe = f.read().strip().splitlines()
+        return "\n".join(reversed(righe[-quanti:]))
+
+    def avvisa_familiari(self, tipo, med, orario, extra=""):
+        if not self.avvisi.get(tipo) or not self.avvisi.get("numeri"):
+            return
+        nome = self._nome_persona(med) or "La persona"
+        ora = dt.datetime.now().strftime("%H:%M")
+        if tipo == "presa":
+            testo = f"{nome} ha preso {med['nome']} (dose delle {orario}) alle {ora}."
+        elif tipo == "non_confermata":
+            testo = (f"ATTENZIONE: {nome} NON ha confermato {med['nome']} delle {orario}. "
+                     f"Nessuna risposta in {TIMEOUT_MIN} minuti.")
+        else:
+            testo = (f"ATTENZIONE: {nome} ha rimandato {extra} volte {med['nome']} "
+                     f"delle {orario} (ultimo rinvio alle {ora}).")
+        testo = "Promemoria Medicine - " + testo
+        for numero in self.avvisi["numeri"]:
+            self.manda_sms(numero, testo)
+
+    def salva_persone(self):
+        salva_medicine(self.file_persone, self.persone)
+        self.principale.aggiorna_lista()
+
+    def modifica_persona(self, indice):
+        self.persona_scr.carica(indice)
+        self.sm.current = "persona"
+
+    def persona_di(self, med):
+        for p in self.persone:
+            if p["id"] == med.get("persona"):
+                return p
+        return None
+
+    def _nome_persona(self, med):
+        p = self.persona_di(med)
+        return p["nome"] if p else ""
 
     def copia_in_app(self, percorso):
         """Copia foto/audio dentro l'app, così restano anche se l'originale viene cancellato."""
@@ -937,9 +1434,12 @@ class PromemoriaApp(App):
                 self.voce.parla("Prova riuscita.")
             return
         self.stato[chiave] = esito
-        registra(self.file_reg, med, orario, esito)
+        self.conta_rinvii.pop(chiave, None)
+        nome = self._nome_persona(med)
+        registra(self.file_reg, med, orario, esito, nome)
+        self.avvisa_familiari(esito.replace(" ", "_"), med, orario)
         if esito == "presa":
-            self.voce.parla("Bravo, grazie!")
+            self.voce.parla(f"Grazie {nome}!" if nome else "Grazie!")
         self.principale.aggiorna_lista()
         Clock.schedule_once(lambda _: self.controlla(), 3)   # se c'è un'altra medicina in attesa
 
@@ -948,7 +1448,11 @@ class PromemoriaApp(App):
         if orario == "PROVA":
             return
         self.rimandi[chiave] = dt.datetime.now() + dt.timedelta(minutes=RIMANDA_MIN)
-        registra(self.file_reg, med, orario, "rimandata")
+        registra(self.file_reg, med, orario, "rimandata", self._nome_persona(med))
+        n = self.conta_rinvii.get(chiave, 0) + 1
+        self.conta_rinvii[chiave] = n
+        if n == self.avvisi.get("rimandi_max", 3):
+            self.avvisa_familiari("rimandi", med, orario, n)
         self.voce.parla(f"Va bene, te lo ricordo tra {RIMANDA_MIN} minuti.")
         self.principale.aggiorna_lista()
 

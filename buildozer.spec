@@ -4,7 +4,7 @@ package.name = promemoriamedicine
 package.domain = org.vincenzo
 source.dir = .
 source.include_exts = py,png,jpg,wav
-version = 1.1
+version = 1.3
 
 icon.filename = %(source.dir)s/icon_512.png
 presplash.filename = %(source.dir)s/presplash.png
@@ -15,7 +15,7 @@ requirements = python3,kivy,pyjnius,android
 orientation = portrait
 fullscreen = 0
 
-android.permissions = READ_EXTERNAL_STORAGE,READ_MEDIA_IMAGES,READ_MEDIA_AUDIO,WAKE_LOCK
+android.permissions = READ_EXTERNAL_STORAGE,READ_MEDIA_IMAGES,READ_MEDIA_AUDIO,WAKE_LOCK,SEND_SMS
 android.api = 33
 android.minapi = 21
 android.archs = arm64-v8a, armeabi-v7a
