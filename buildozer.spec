@@ -4,9 +4,12 @@ package.name = promemoriamedicine
 package.domain = org.vincenzo
 source.dir = .
 source.include_exts = py,png,jpg,wav
-version = 1.5
+version = 1.6
 
 icon.filename = %(source.dir)s/icon_512.png
+# icona adattiva: disegno e sfondo separati, così Samsung non la rimpicciolisce nel riquadro bianco
+icon.adaptive_foreground.filename = %(source.dir)s/icon_fg.png
+icon.adaptive_background.filename = %(source.dir)s/icon_bg.png
 presplash.filename = %(source.dir)s/presplash.png
 android.presplash_color = #FFF8E7
 
