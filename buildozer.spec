@@ -4,7 +4,7 @@ package.name = promemoriamedicine
 package.domain = org.vincenzo
 source.dir = .
 source.include_exts = py,png,jpg,wav
-version = 1.6
+version = 1.7
 
 icon.filename = %(source.dir)s/icon_512.png
 # icona adattiva: disegno e sfondo separati, così Samsung non la rimpicciolisce nel riquadro bianco
@@ -18,10 +18,13 @@ requirements = python3,kivy,pyjnius,android
 # l'app può fare da schermata Home: così parte da sola all'accensione del telefono
 android.manifest.intent_filters = intent_filters.xml
 
+# componente che riprogramma la sveglia quando il telefono si accende (sorgente in avvio_sorgente/)
+android.add_aars = avvio.aar
+
 orientation = portrait
 fullscreen = 0
 
-android.permissions = INTERNET,READ_EXTERNAL_STORAGE,READ_MEDIA_IMAGES,READ_MEDIA_AUDIO,WAKE_LOCK,SEND_SMS,SCHEDULE_EXACT_ALARM,USE_EXACT_ALARM
+android.permissions = INTERNET,READ_EXTERNAL_STORAGE,READ_MEDIA_IMAGES,READ_MEDIA_AUDIO,WAKE_LOCK,SEND_SMS,SCHEDULE_EXACT_ALARM,USE_EXACT_ALARM,RECEIVE_BOOT_COMPLETED,SYSTEM_ALERT_WINDOW
 android.api = 33
 android.minapi = 21
 android.archs = arm64-v8a, armeabi-v7a

@@ -5,7 +5,8 @@ Pensata per un telefono/tablet dedicato, sempre in carica e con l'app aperta.
 
 - Orologio grande + elenco delle medicine di oggi
 - All'ora giusta: schermata a tutto schermo con foto, nome, dose,
-  campanello + voce (sintesi vocale di Android o messaggio registrato)
+  suoneria della sveglia (volume crescente, si sente anche in silenzioso)
+  alternata alla voce (sintesi vocale di Android o messaggio registrato)
 - Pulsanti: L'HO PRESA / RICORDAMELO TRA 10 MINUTI / RIPETI
 - Impostazioni protette: si aprono tenendo premuto il pulsante 2 secondi
 - Storico delle risposte
@@ -51,7 +52,11 @@ ANDROID = platform == "android"
 
 # ---------------- impostazioni ----------------
 RIMANDA_MIN = 10        # minuti del pulsante "ricordamelo dopo"
-RIPETI_VOCE_SEC = 60    # ogni quanto ripete l'annuncio
+PRIMO_SQUILLO_SEC = 8   # quanto suona la suoneria prima della prima voce
+SQUILLO_SEC = 15        # poi: quanto suona la suoneria tra un annuncio e l'altro
+VOLUME_INIZIALE = 0.15  # la suoneria parte piano...
+CRESCENDO_SEC = 25      # ...e arriva al massimo in questi secondi
+VOLUME_MINIMO = 0.6     # se il volume SVEGLIA del telefono è sotto il 60%, lo alza a 60%
 TIMEOUT_MIN = 30        # dopo quanto, senza risposta, segna "non confermata"
 MAX_RITARDO_ORE = 2     # dopo un riavvio non suona per orari più vecchi di così
 
@@ -110,6 +115,36 @@ if ANDROID:
         else:
             finestra.clearFlags(128)
 
+    def puo_aprirsi_da_sola():
+        """Permesso «Mostra sopra altre app»: garantisce che la sveglia apra l'app anche
+        quando è chiusa, su tutte le versioni di Android."""
+        try:
+            if autoclass("android.os.Build$VERSION").SDK_INT < 23:
+                return True
+            return bool(autoclass("android.provider.Settings").canDrawOverlays(PythonActivity.mActivity))
+        except Exception:
+            return True
+
+    def chiedi_apertura_da_sola():
+        try:
+            Intent = autoclass("android.content.Intent")
+            Uri = autoclass("android.net.Uri")
+            att = PythonActivity.mActivity
+            i = Intent("android.settings.action.MANAGE_OVERLAY_PERMISSION",
+                       Uri.parse("package:" + att.getPackageName()))
+            i.addFlags(0x10000000)
+            att.startActivity(i)
+        except Exception as e:
+            print("Permesso sovrapposizione:", e)
+
+    @run_on_ui_thread
+    def metti_in_secondo_piano():
+        """Telefono personale: dopo la risposta l'app si toglie di mezzo."""
+        try:
+            PythonActivity.mActivity.moveTaskToBack(True)
+        except Exception as e:
+            print("Secondo piano:", e)
+
     def apri_impostazioni_telefono(quale="android.settings.SETTINGS"):
         try:
             Intent = autoclass("android.content.Intent")
@@ -130,7 +165,10 @@ if ANDROID:
             PendingIntent = autoclass("android.app.PendingIntent")
             AlarmClockInfo = autoclass("android.app.AlarmManager$AlarmClockInfo")
             att = PythonActivity.mActivity
-            intent = Intent(att, att.getClass())
+            # stesso intent che usa il componente di avvio (avvio.aar) dopo l'accensione
+            intent = att.getPackageManager().getLaunchIntentForPackage(att.getPackageName())
+            if intent is None:
+                intent = Intent(att, att.getClass())
             intent.addFlags(0x10000000 | 0x20000000)        # NEW_TASK | SINGLE_TOP
             pi = PendingIntent.getActivity(att, 4242, intent, 0x08000000 | 0x04000000)  # UPDATE | IMMUTABLE
             am = cast("android.app.AlarmManager", att.getSystemService("alarm"))
@@ -139,6 +177,8 @@ if ANDROID:
             except Exception as e:
                 print("setAlarmClock non riuscito, uso setExact:", e)
                 am.setExactAndAllowWhileIdle(0, quando_ms, pi)   # 0 = RTC_WAKEUP
+            # la ricorda per il componente che la riprogramma all'accensione del telefono
+            att.getSharedPreferences("promemoria", 0).edit().putLong("prossima", quando_ms).apply()
             return True
         except Exception as e:
             print("Risveglio non programmato:", e)
@@ -165,6 +205,15 @@ else:
 
     def apri_impostazioni_telefono(quale=""):
         avviso("Solo sul telefono", "Questo pulsante apre le impostazioni\ndi Android: sul PC non fa nulla.")
+
+    def puo_aprirsi_da_sola():
+        return True
+
+    def chiedi_apertura_da_sola():
+        avviso("Solo sul telefono", "Questo pulsante apre un'impostazione\ndi Android: sul PC non fa nulla.")
+
+    def metti_in_secondo_piano():
+        print("[PC] l'app andrebbe in secondo piano")
 
     def chiedi_permessi(poi):
         poi()
@@ -264,7 +313,7 @@ def cerca_chat_telegram(token):
 AVVISI_PREDEFINITI = {"numeri": [], "presa": True, "non_confermata": True,
                       "rimandi": True, "rimandi_max": 3,
                       "sms_attivo": True, "telegram_attivo": False, "token": "", "chat": [],
-                      "schermo_sempre_acceso": True}
+                      "schermo_sempre_acceso": True, "telefono_personale": False}
 
 
 def carica_avvisi(percorso):
@@ -297,21 +346,171 @@ def crea_campanello(percorso):
         w.writeframes(bytes(dati))
 
 
+def crea_suoneria(percorso):
+    """Suoneria di riserva (se il telefono non ne ha una): due toni alternati, 2,4 secondi
+    da ripetere in continuo."""
+    if os.path.exists(percorso):
+        return
+    fc = 22050
+    dati = bytearray()
+    for f, durata in ((880, 0.25), (0, 0.08), (1175, 0.25), (0, 0.08),
+                      (880, 0.25), (0, 0.08), (1175, 0.25), (0, 1.16)):
+        n = int(fc * durata)
+        for i in range(n):
+            inviluppo = min(1.0, i / 200, (n - i) / 200) if f else 0
+            v = int(22000 * inviluppo * math.sin(2 * math.pi * f * i / fc)) if f else 0
+            dati += struct.pack("<h", v)
+    with wave.open(percorso, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(fc)
+        w.writeframes(bytes(dati))
+
+
 class Voce:
+    """Voce, messaggi registrati e suoneria. Su Android usa il canale SVEGLIA:
+    si sente anche con il telefono in silenzioso, come la sveglia del telefono."""
+
     def __init__(self, cartella):
         self.file_campanello = os.path.join(cartella, "campanello.wav")
         crea_campanello(self.file_campanello)
-        self.mp = None          # MediaPlayer Android
+        self.file_suoneria = os.path.join(cartella, "suoneria.wav")
+        crea_suoneria(self.file_suoneria)
+        self.mp = None          # MediaPlayer Android (voce registrata)
+        self.mp_suoneria = None
         self.suono = None       # SoundLoader su PC
+        self.suoneria_pc = None
         self.tts = None
+        self.attr = None        # AudioAttributes "sveglia"
         self.lingua_ok = False
         self.lock_pc = threading.Lock()
         if ANDROID:
             try:
+                Builder = autoclass("android.media.AudioAttributes$Builder")
+                self.attr = Builder().setUsage(4).setContentType(4).build()   # USAGE_ALARM, SONIFICATION
+            except Exception as e:
+                print("AudioAttributes:", e)
+            try:
                 TextToSpeech = autoclass("android.speech.tts.TextToSpeech")
                 self.tts = TextToSpeech(PythonActivity.mActivity, None)
+                if self.attr:
+                    self.tts.setAudioAttributes(self.attr)
             except Exception as e:
                 print("TTS non disponibile:", e)
+
+    # ---- volume SVEGLIA del telefono ----
+    def alza_volume_sveglia(self):
+        if not ANDROID:
+            return
+        try:
+            from jnius import cast
+            am = cast("android.media.AudioManager",
+                      PythonActivity.mActivity.getSystemService("audio"))
+            massimo = am.getStreamMaxVolume(4)                 # 4 = STREAM_ALARM
+            minimo = max(1, int(round(massimo * VOLUME_MINIMO)))
+            if am.getStreamVolume(4) < minimo:
+                am.setStreamVolume(4, minimo, 0)
+        except Exception as e:
+            print("Volume sveglia:", e)
+
+    # ---- suoneria ----
+    def _nuovo_player(self):
+        MediaPlayer = autoclass("android.media.MediaPlayer")
+        mp = MediaPlayer()
+        if self.attr:
+            mp.setAudioAttributes(self.attr)
+        return mp
+
+    def avvia_suoneria(self, volume=VOLUME_INIZIALE):
+        self.ferma_suoneria()
+        if ANDROID:
+            self.alza_volume_sveglia()
+            mp = None
+            try:
+                RingtoneManager = autoclass("android.media.RingtoneManager")
+                att = PythonActivity.mActivity
+                uri = (RingtoneManager.getActualDefaultRingtoneUri(att, 4) or
+                       RingtoneManager.getDefaultUri(4))          # 4 = TYPE_ALARM
+                if uri is None:
+                    raise ValueError("nessuna suoneria sveglia")
+                mp = self._nuovo_player()
+                mp.setDataSource(att, uri)
+                mp.prepare()
+            except Exception as e:
+                print("Suoneria del telefono non disponibile, uso quella dell'app:", e)
+                try:
+                    if mp:
+                        mp.release()
+                    mp = self._nuovo_player()
+                    mp.setDataSource(self.file_suoneria)
+                    mp.prepare()
+                except Exception as e2:
+                    print("Suoneria:", e2)
+                    return
+            try:
+                mp.setLooping(True)
+                mp.setVolume(volume, volume)
+                mp.start()
+                self.mp_suoneria = mp
+            except Exception as e:
+                print("Suoneria:", e)
+        else:
+            s = SoundLoader.load(self.file_suoneria)
+            if s:
+                s.loop = True
+                s.volume = volume
+                s.play()
+                self.suoneria_pc = s
+
+    def volume_suoneria(self, volume):
+        try:
+            if self.mp_suoneria:
+                self.mp_suoneria.setVolume(volume, volume)
+            elif self.suoneria_pc:
+                self.suoneria_pc.volume = volume
+        except Exception:
+            pass
+
+    def pausa_suoneria(self):
+        try:
+            if self.mp_suoneria:
+                self.mp_suoneria.pause()
+            elif self.suoneria_pc:
+                self.suoneria_pc.stop()
+        except Exception:
+            pass
+
+    def riprendi_suoneria(self):
+        try:
+            if self.mp_suoneria:
+                self.mp_suoneria.start()
+            elif self.suoneria_pc:
+                self.suoneria_pc.play()
+        except Exception:
+            pass
+
+    def ferma_suoneria(self):
+        if self.mp_suoneria:
+            try:
+                self.mp_suoneria.stop()
+                self.mp_suoneria.release()
+            except Exception:
+                pass
+            self.mp_suoneria = None
+        if self.suoneria_pc:
+            self.suoneria_pc.stop()
+            self.suoneria_pc = None
+
+    def sta_parlando(self):
+        """True finché la voce (o il messaggio registrato) non ha finito."""
+        try:
+            if ANDROID:
+                if self.tts and self.tts.isSpeaking():
+                    return True
+                return bool(self.mp and self.mp.isPlaying())
+            return self.lock_pc.locked() or bool(self.suono and self.suono.state == "play")
+        except Exception:
+            return False
 
     # ---- sintesi vocale ----
     def parla(self, testo):
@@ -325,7 +524,10 @@ class Voce:
                     self.tts.setSpeechRate(0.85)     # un po' più lenta
                     self.lingua_ok = True
                 try:
-                    self.tts.speak(testo, 0, None, "promemoria")   # Android 5+
+                    Bundle = autoclass("android.os.Bundle")
+                    parametri = Bundle()
+                    parametri.putInt("streamType", 4)              # canale SVEGLIA
+                    self.tts.speak(testo, 0, parametri, "promemoria")   # Android 5+
                 except Exception:
                     self.tts.speak(testo, 0, None)                 # telefoni più vecchi
             except Exception as e:
@@ -355,8 +557,7 @@ class Voce:
         self.ferma_audio()
         try:
             if ANDROID:
-                MediaPlayer = autoclass("android.media.MediaPlayer")
-                self.mp = MediaPlayer()
+                self.mp = self._nuovo_player()
                 self.mp.setDataSource(percorso)
                 self.mp.prepare()
                 self.mp.start()
@@ -636,7 +837,6 @@ class Allarme(ModalView):
         self.app, self.med, self.orario, self.chiave = app, med, orario, chiave
         self.inizio = dt.datetime.now()
         self.acceso = True
-        self.ev_parla = None
 
         box = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(10))
         sfondo(box, self.fondo)
@@ -665,13 +865,17 @@ class Allarme(ModalView):
         riga = BoxLayout(size_hint_y=None, height=dp(90), spacing=dp(10))
         riga.add_widget(bottone(f"RICORDAMELO\nTRA {RIMANDA_MIN} MINUTI", ARANCIO, 20,
                                 dp(90), self.rimanda))
-        riga.add_widget(bottone("RIPETI", BLU, 22, dp(90), self.annuncia_una_volta))
+        riga.add_widget(bottone("RIPETI", BLU, 22, dp(90), self._passa_a_voce))
         box.add_widget(riga)
         self.add_widget(box)
 
-        self.ev_voce = Clock.schedule_interval(lambda _: self._annuncia(), RIPETI_VOCE_SEC)
+        # suoneria (volume crescente) e voce si alternano finché non si risponde
+        self.fase = "squillo"
+        self.durata_squillo = PRIMO_SQUILLO_SEC
+        self.inizio_fase = dt.datetime.now()
+        app.voce.avvia_suoneria(VOLUME_INIZIALE)
+        self.ev_tick = Clock.schedule_interval(lambda _: self._tick(), 0.5)
         self.ev_lampeggio = Clock.schedule_interval(lambda _: self._lampeggia(), 0.7)
-        Clock.schedule_once(lambda _: self._annuncia(), 0.3)
 
     def messaggio(self):
         if self.med.get("messaggio"):
@@ -687,22 +891,39 @@ class Allarme(ModalView):
         else:
             self.app.voce.parla(self.messaggio())
 
-    def _annuncia(self):
-        if dt.datetime.now() - self.inizio > dt.timedelta(minutes=TIMEOUT_MIN):
+    def _tick(self):
+        adesso = dt.datetime.now()
+        if adesso - self.inizio > dt.timedelta(minutes=TIMEOUT_MIN):
             self.chiudi("non confermata")
             return
-        self.app.voce.campanello()
-        self.ev_parla = Clock.schedule_once(lambda _: self.annuncia_una_volta(), 1.8)
+        trascorso = (adesso - self.inizio_fase).total_seconds()
+        if self.fase == "squillo":
+            totale = (adesso - self.inizio).total_seconds()
+            volume = min(1.0, VOLUME_INIZIALE + (1 - VOLUME_INIZIALE) * totale / CRESCENDO_SEC)
+            self.app.voce.volume_suoneria(volume)
+            if trascorso >= self.durata_squillo:
+                self._passa_a_voce()
+        elif (trascorso > 2.5 and not self.app.voce.sta_parlando()) or trascorso > 30:
+            self.fase = "squillo"
+            self.durata_squillo = SQUILLO_SEC
+            self.inizio_fase = adesso
+            self.app.voce.riprendi_suoneria()
+
+    def _passa_a_voce(self):
+        self.app.voce.pausa_suoneria()
+        self.app.voce.zitto()
+        self.annuncia_una_volta()
+        self.fase = "voce"
+        self.inizio_fase = dt.datetime.now()
 
     def _lampeggia(self):
         self.acceso = not self.acceso
         self.titolo.color = hexc(ROSSO) if self.acceso else hexc(self.fondo)
 
     def _ferma(self):
-        self.ev_voce.cancel()
+        self.ev_tick.cancel()
         self.ev_lampeggio.cancel()
-        if self.ev_parla:
-            self.ev_parla.cancel()
+        self.app.voce.ferma_suoneria()
         self.app.voce.zitto()
         self.app.voce.ferma_audio()
 
@@ -837,6 +1058,8 @@ class SchermataGestione(Screen):
                                lambda: app.vai("avvisi")))
         self.btn_schermo = bottone("", "#5A5A5A", 15, dp(44), self._cambia_schermo)
         box.add_widget(self.btn_schermo)
+        self.btn_apertura = bottone("", VERDE, 15, dp(44), self._apertura)
+        box.add_widget(self.btn_apertura)
         r = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
         r.add_widget(bottone("Impostazioni del telefono", "#5A5A5A", 14, dp(44),
                              apri_impostazioni_telefono))
@@ -848,16 +1071,36 @@ class SchermataGestione(Screen):
         self.add_widget(box)
 
     def _testo_schermo(self):
-        acceso = App.get_running_app().avvisi.get("schermo_sempre_acceso", True)
-        self.btn_schermo.text = ("Schermo sempre acceso: SÌ  (tocca per cambiare)" if acceso else
-                                 "Schermo sempre acceso: NO - si spegne, la sveglia lo riaccende")
+        app = App.get_running_app()
+        if app.avvisi.get("telefono_personale"):
+            self.btn_schermo.text = "Telefono PERSONALE: l'app si apre solo per le medicine"
+        else:
+            self.btn_schermo.text = "Telefono DEDICATO: orologio sempre acceso"
+        ok = puo_aprirsi_da_sola()
+        self.btn_apertura.text = ("Apertura automatica: ATTIVA" if ok else
+                                  "Apertura automatica: DA ATTIVARE (tocca qui)")
+        self.btn_apertura.background_color = hexc(VERDE if ok else ROSSO)
 
     def _cambia_schermo(self):
         app = App.get_running_app()
-        app.avvisi["schermo_sempre_acceso"] = not app.avvisi.get("schermo_sempre_acceso", True)
+        personale = not app.avvisi.get("telefono_personale", False)
+        app.avvisi["telefono_personale"] = personale
+        app.avvisi["schermo_sempre_acceso"] = not personale
         app.salva_avvisi()
-        imposta_schermo(app.avvisi["schermo_sempre_acceso"])
+        app.applica_schermo()
         self._testo_schermo()
+
+    def _apertura(self):
+        if puo_aprirsi_da_sola():
+            avviso("Apertura automatica", "È già attiva: all'ora della medicina\n"
+                                          "l'app si apre da sola anche se è chiusa.")
+        else:
+            avviso("Apertura automatica", "Si apre un'impostazione di Android:\n"
+                                          "attiva «Promemoria Medicine»\npoi torna indietro.")
+            Clock.schedule_once(lambda _: chiedi_apertura_da_sola(), 2.5)
+
+    def on_enter(self, *_):
+        self._testo_schermo()      # aggiorna lo stato dopo il ritorno dalle impostazioni
 
     def on_pre_enter(self, *_):
         app = App.get_running_app()
@@ -1517,10 +1760,19 @@ class PromemoriaApp(App):
 
     def on_resume(self):
         self.applica_schermo()
+        if self.sm.current == "gestione":
+            self.sm.get_screen("gestione")._testo_schermo()
         Clock.schedule_once(lambda _: self.controlla(), 0.5)   # se ci ha svegliato la sveglia
 
     def applica_schermo(self):
-        imposta_schermo(bool(self.allarme) or self.avvisi.get("schermo_sempre_acceso", True))
+        dedicato = not self.avvisi.get("telefono_personale", False)
+        imposta_schermo(bool(self.allarme) or dedicato)
+
+    def dopo_la_risposta(self):
+        """Sul telefono personale l'app torna in secondo piano dopo la risposta
+        (a meno che non stia già suonando un'altra medicina)."""
+        if self.avvisi.get("telefono_personale") and self.allarme is None:
+            metti_in_secondo_piano()
 
     # ---- sveglia di sistema: riaccende il telefono anche in standby ----
     def prossima_sveglia(self):
@@ -1708,6 +1960,7 @@ class PromemoriaApp(App):
         self.programma_prossima()
         if esito == "presa":
             self.voce.parla(f"Grazie {nome}!" if nome else "Grazie!")
+        Clock.schedule_once(lambda _: self.dopo_la_risposta(), 6)
         self.principale.aggiorna_lista()
         Clock.schedule_once(lambda _: self.controlla(), 3)   # se c'è un'altra medicina in attesa
 
@@ -1724,6 +1977,7 @@ class PromemoriaApp(App):
             self.avvisa_familiari("rimandi", med, orario, n)
         self.programma_prossima()
         self.voce.parla(f"Va bene, te lo ricordo tra {RIMANDA_MIN} minuti.")
+        Clock.schedule_once(lambda _: self.dopo_la_risposta(), 6)
         self.principale.aggiorna_lista()
 
 
