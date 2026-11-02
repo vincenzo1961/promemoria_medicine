@@ -20,6 +20,8 @@ android.manifest.intent_filters = intent_filters.xml
 
 # componente che riprogramma la sveglia quando il telefono si accende (sorgente in avvio_sorgente/)
 android.add_aars = avvio.aar
+# dice a Gradle di cercare il file .aar nella cartella libs (dove lo copia buildozer)
+android.add_gradle_repositories = flatDir { dirs 'libs' }
 
 orientation = portrait
 fullscreen = 0
