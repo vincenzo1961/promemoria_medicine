@@ -39,12 +39,22 @@ jobs:
           DEBUG_KEYSTORE: ${{ secrets.DEBUG_KEYSTORE }}
         run: |
           if [ -z "$DEBUG_KEYSTORE" ]; then
-            echo "::error::Manca il segreto DEBUG_KEYSTORE: senza, ogni APK ha una firma diversa e non si aggiorna."
+            echo "::error::Manca il segreto DEBUG_KEYSTORE (Settings > Secrets and variables > Actions > Repository secrets)."
             exit 1
           fi
           mkdir -p ~/.android
-          echo "$DEBUG_KEYSTORE" | base64 -d > ~/.android/debug.keystore
-          keytool -list -keystore ~/.android/debug.keystore -storepass android | grep -i "SHA-256"
+          # toglie spazi e "a capo" che il copia-incolla può aggiungere
+          printf '%s' "$DEBUG_KEYSTORE" | tr -d ' \r\n\t' | base64 -d > ~/.android/debug.keystore 2>/dev/null || {
+            echo "::error::Il testo del segreto DEBUG_KEYSTORE non è valido: incollalo di nuovo per intero."
+            exit 1
+          }
+          echo "Firma caricata: $(wc -c < ~/.android/debug.keystore) byte"
+          if ! keytool -list -keystore ~/.android/debug.keystore -storepass android > firma.txt 2>&1; then
+            cat firma.txt
+            echo "::error::Il segreto DEBUG_KEYSTORE è incompleto o rovinato: incollalo di nuovo per intero."
+            exit 1
+          fi
+          grep -i "SHA" firma.txt || cat firma.txt
 
       - name: Costruisci l'APK
         env:
