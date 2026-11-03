@@ -137,6 +137,28 @@ if ANDROID:
         except Exception as e:
             print("Permesso sovrapposizione:", e)
 
+    def batteria_senza_limiti():
+        try:
+            from jnius import cast
+            att = PythonActivity.mActivity
+            pm = cast("android.os.PowerManager", att.getSystemService("power"))
+            return bool(pm.isIgnoringBatteryOptimizations(att.getPackageName()))
+        except Exception:
+            return True
+
+    def chiedi_batteria_senza_limiti():
+        try:
+            Intent = autoclass("android.content.Intent")
+            Uri = autoclass("android.net.Uri")
+            att = PythonActivity.mActivity
+            i = Intent("android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+                       Uri.parse("package:" + att.getPackageName()))
+            i.addFlags(0x10000000)
+            att.startActivity(i)
+        except Exception as e:
+            print("Batteria:", e)
+            apri_impostazioni_telefono("android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS")
+
     @run_on_ui_thread
     def metti_in_secondo_piano():
         """Telefono personale: dopo la risposta l'app si toglie di mezzo."""
@@ -208,6 +230,12 @@ else:
 
     def puo_aprirsi_da_sola():
         return True
+
+    def batteria_senza_limiti():
+        return True
+
+    def chiedi_batteria_senza_limiti():
+        avviso("Solo sul telefono", "Questo pulsante apre un'impostazione\ndi Android: sul PC non fa nulla.")
 
     def chiedi_apertura_da_sola():
         avviso("Solo sul telefono", "Questo pulsante apre un'impostazione\ndi Android: sul PC non fa nulla.")
@@ -313,7 +341,8 @@ def cerca_chat_telegram(token):
 AVVISI_PREDEFINITI = {"numeri": [], "presa": True, "non_confermata": True,
                       "rimandi": True, "rimandi_max": 3,
                       "sms_attivo": True, "telegram_attivo": False, "token": "", "chat": [],
-                      "schermo_sempre_acceso": True, "telefono_personale": False}
+                      "schermo_sempre_acceso": True, "telefono_personale": False,
+                      "configurato": False}
 
 
 def carica_avvisi(percorso):
@@ -587,9 +616,9 @@ class Voce:
 #  DATI
 # =====================================================
 def persone_esempio():
+    """Al primo avvio c'è una sola persona, da rinominare nella configurazione guidata."""
     return [
-        {"id": "p1", "nome": "Caterina", "colore": "rosa"},
-        {"id": "p2", "nome": "Tommaso", "colore": "azzurro"},
+        {"id": "p1", "nome": "Utente", "colore": "azzurro"},
     ]
 
 
@@ -602,20 +631,22 @@ def carica_persone(percorso):
         return json.load(f)
 
 
+ESEMPI = {("Pastiglia della pressione", "1 compressa con un bicchiere d'acqua"),
+          ("Vitamina D", "10 gocce")}
+
+
+def e_esempio(med):
+    return bool(med.get("esempio")) or (med.get("nome"), med.get("dose")) in ESEMPI
+
+
 def colori_di(persona):
     """(forte, chiaro, sfondo sveglia) del colore scelto per la persona."""
     return PALETTE.get((persona or {}).get("colore"), PALETTE["verde"])
 
 
 def medicine_esempio():
-    return [
-        {"id": str(uuid.uuid4()), "nome": "Pastiglia della pressione",
-         "dose": "1 compressa con un bicchiere d'acqua", "orari": ["08:00", "20:00"],
-         "foto": "", "audio": "", "messaggio": "", "persona": "p1"},
-        {"id": str(uuid.uuid4()), "nome": "Vitamina D",
-         "dose": "10 gocce", "orari": ["13:00"],
-         "foto": "", "audio": "", "messaggio": "", "persona": "p2"},
-    ]
+    """Al primo avvio nessuna medicina: si aggiungono alla fine della configurazione guidata."""
+    return []
 
 
 def carica_medicine(percorso):
@@ -1041,7 +1072,8 @@ class SchermataGestione(Screen):
         box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
         sfondo(box, BG)
         box.add_widget(etichetta("Impostazioni", 28, True))
-        box.add_widget(etichetta("Tocca una medicina per modificarla", 16, colore=GRIGIO))
+        self.lbl_sotto = etichetta("Tocca una medicina per modificarla", 15, colore=GRIGIO)
+        box.add_widget(self.lbl_sotto)
         scroll = ScrollView()
         self.lista = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(6))
         self.lista.bind(minimum_height=self.lista.setter("height"))
@@ -1056,15 +1088,14 @@ class SchermataGestione(Screen):
         box.add_widget(r)
         box.add_widget(bottone("Avvisi ai familiari (SMS / Telegram)", "#00897B", 18, dp(60),
                                lambda: app.vai("avvisi")))
-        self.btn_schermo = bottone("", "#5A5A5A", 15, dp(44), self._cambia_schermo)
-        box.add_widget(self.btn_schermo)
-        self.btn_apertura = bottone("", VERDE, 15, dp(44), self._apertura)
+        # compare solo se c'è qualcosa da sistemare
+        self.btn_apertura = bottone("", ROSSO, 15, dp(44), self._apertura)
         box.add_widget(self.btn_apertura)
-        r = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
-        r.add_widget(bottone("Impostazioni del telefono", "#5A5A5A", 14, dp(44),
+        r = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(8))
+        r.add_widget(bottone("Configurazione guidata", "#7B4FB8", 15, dp(50),
+                             lambda: app.avvia_guida()))
+        r.add_widget(bottone("Impostazioni del telefono", "#5A5A5A", 14, dp(50),
                              apri_impostazioni_telefono))
-        r.add_widget(bottone("Scegli schermata Home", "#5A5A5A", 14, dp(44),
-                             lambda: apri_impostazioni_telefono("android.settings.HOME_SETTINGS")))
         box.add_widget(r)
         box.add_widget(bottone("Torna all'orologio", GRIGIO, 20, dp(60),
                                lambda: app.vai("principale")))
@@ -1072,32 +1103,31 @@ class SchermataGestione(Screen):
 
     def _testo_schermo(self):
         app = App.get_running_app()
-        if app.avvisi.get("telefono_personale"):
-            self.btn_schermo.text = "Telefono PERSONALE: l'app si apre solo per le medicine"
+        tipo = ("Telefono personale" if app.avvisi.get("telefono_personale")
+                else "Telefono dedicato")
+        self.lbl_sotto.text = f"{tipo} · tocca una medicina per modificarla"
+        problemi = []
+        if not puo_aprirsi_da_sola():
+            problemi.append("apertura automatica")
+        if not batteria_senza_limiti():
+            problemi.append("batteria")
+        if problemi:
+            self.btn_apertura.text = "Da sistemare: " + " e ".join(problemi) + " (tocca qui)"
+            self.btn_apertura.height = dp(44)
+            self.btn_apertura.opacity = 1
+            self.btn_apertura.disabled = False
         else:
-            self.btn_schermo.text = "Telefono DEDICATO: orologio sempre acceso"
-        ok = puo_aprirsi_da_sola()
-        self.btn_apertura.text = ("Apertura automatica: ATTIVA" if ok else
-                                  "Apertura automatica: DA ATTIVARE (tocca qui)")
-        self.btn_apertura.background_color = hexc(VERDE if ok else ROSSO)
-
-    def _cambia_schermo(self):
-        app = App.get_running_app()
-        personale = not app.avvisi.get("telefono_personale", False)
-        app.avvisi["telefono_personale"] = personale
-        app.avvisi["schermo_sempre_acceso"] = not personale
-        app.salva_avvisi()
-        app.applica_schermo()
-        self._testo_schermo()
+            self.btn_apertura.height = 0
+            self.btn_apertura.opacity = 0
+            self.btn_apertura.disabled = True
 
     def _apertura(self):
-        if puo_aprirsi_da_sola():
-            avviso("Apertura automatica", "È già attiva: all'ora della medicina\n"
-                                          "l'app si apre da sola anche se è chiusa.")
-        else:
+        if not puo_aprirsi_da_sola():
             avviso("Apertura automatica", "Si apre un'impostazione di Android:\n"
                                           "attiva «Promemoria Medicine»\npoi torna indietro.")
             Clock.schedule_once(lambda _: chiedi_apertura_da_sola(), 2.5)
+        elif not batteria_senza_limiti():
+            chiedi_batteria_senza_limiti()
 
     def on_enter(self, *_):
         self._testo_schermo()      # aggiorna lo stato dopo il ritorno dalle impostazioni
@@ -1665,6 +1695,284 @@ class SchermataAvvisi(Screen):
 
 
 # =====================================================
+#  CONFIGURAZIONE GUIDATA (al primo avvio, o da Impostazioni)
+# =====================================================
+class SchermataGuida(Screen):
+    """Una domanda per schermata, con pulsanti grandi. Le scelte vengono salvate subito."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        esterno = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(8))
+        sfondo(esterno, BG)
+        self.lbl_passo = etichetta("", 14, colore=GRIGIO)
+        esterno.add_widget(self.lbl_passo)
+        self.lbl_titolo = etichetta("", 26, True)
+        esterno.add_widget(self.lbl_titolo)
+        scroll = ScrollView()
+        self.corpo = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10),
+                               padding=(0, dp(6)))
+        self.corpo.bind(minimum_height=self.corpo.setter("height"))
+        scroll.add_widget(self.corpo)
+        esterno.add_widget(scroll)
+        self.btn_indietro = bottone("< Indietro", GRIGIO, 16, dp(46), self.indietro)
+        esterno.add_widget(self.btn_indietro)
+        self.add_widget(esterno)
+        self.storia = []
+        self.passo = "benvenuto"
+        self.vuole_avvisi = False
+        self.ev_prova = None
+
+    # ---- navigazione ----
+    PASSI = ["benvenuto", "telefono", "apertura", "batteria", "esempi", "persone",
+             "suono", "avvisi", "fine"]
+
+    def ricomincia(self):
+        self.storia = []
+        self.vai("benvenuto", ricorda=False)
+
+    def vai(self, passo, ricorda=True):
+        self._ferma_prova()
+        if ricorda:
+            self.storia.append(self.passo)
+        self.passo = passo
+        self.disegna()
+
+    def indietro(self):
+        self._ferma_prova()
+        if self.storia:
+            self.passo = self.storia.pop()
+            self.disegna()
+
+    def on_enter(self, *_):
+        self.disegna()      # aggiorna lo stato dopo il ritorno da un'impostazione di Android
+
+    def disegna(self):
+        self.corpo.clear_widgets()
+        n = self.PASSI.index(self.passo)
+        self.lbl_passo.text = f"Configurazione guidata · passo {n + 1} di {len(self.PASSI)}"
+        self.btn_indietro.opacity = 1 if self.storia else 0
+        self.btn_indietro.disabled = not self.storia
+        getattr(self, "p_" + self.passo)()
+
+    # ---- piccoli aiuti ----
+    def _testo(self, t, size=18, colore=TESTO, bold=False):
+        self.corpo.add_widget(etichetta(t, size, bold, colore))
+
+    def _scelta(self, testo, colore, azione, alto=dp(72), size=20):
+        self.corpo.add_widget(bottone(testo, colore, size, alto, azione))
+
+    def _stato(self, ok, testo_ok, testo_no):
+        l = Label(text=("OK - " + testo_ok) if ok else ("DA FARE - " + testo_no),
+                  font_size=sp(17), bold=True, color=(1, 1, 1, 1), size_hint_y=None,
+                  height=dp(48))
+        sfondo(l, VERDE if ok else ROSSO)
+        self.corpo.add_widget(l)
+
+    def _salva(self, **valori):
+        app = App.get_running_app()
+        app.avvisi.update(valori)
+        app.salva_avvisi()
+
+    # ---- i passi ----
+    def p_benvenuto(self):
+        self.lbl_titolo.text = "Benvenuto!"
+        self._testo("Ti faccio qualche domanda per preparare l'app nel modo giusto.\n\n"
+                    "Ci vogliono 2 minuti. Ogni scelta si può cambiare dopo da "
+                    "Impostazioni > Configurazione guidata.")
+        self._scelta("INIZIAMO", VERDE, lambda: self.vai("telefono"), dp(80), 24)
+
+    def p_telefono(self):
+        self.lbl_titolo.text = "Su quale telefono è installata?"
+        self._testo("È il telefono che la persona usa tutti i giorni\n(per chiamare, WhatsApp…)?", 18)
+        self._scelta("SÌ, è il suo telefono personale\n[size=15]l'app si apre da sola solo all'ora "
+                     "delle medicine[/size]", BLU, lambda: self._telefono(True), dp(92))
+        self._scelta("NO, è un telefono dedicato\n[size=15]sempre in carica, mostra l'orologio "
+                     "tutto il giorno[/size]", ARANCIO, lambda: self._telefono(False), dp(92))
+        for b in self.corpo.children[:2]:
+            b.markup = True
+
+    def _telefono(self, personale):
+        self._salva(telefono_personale=personale, schermo_sempre_acceso=not personale)
+        App.get_running_app().applica_schermo()
+        self.vai("apertura")
+
+    def p_apertura(self):
+        app = App.get_running_app()
+        personale = app.avvisi.get("telefono_personale")
+        ok = puo_aprirsi_da_sola()
+        self.lbl_titolo.text = "Aprirsi da sola all'ora giusta"
+        self._testo("Per suonare anche quando l'app è chiusa e lo schermo è spento, "
+                    "Android deve permetterle di «comparire sopra le altre app».", 17)
+        self._stato(ok, "permesso concesso", "permesso da concedere")
+        if not ok:
+            self._testo("Tocca il pulsante qui sotto: si apre un'impostazione di Android. "
+                        "Attiva «Promemoria Medicine», poi torna indietro.", 15, GRIGIO)
+            self._scelta("CONCEDI IL PERMESSO", VERDE, chiedi_apertura_da_sola)
+        if not personale:
+            self._testo("\nTelefono dedicato: conviene usare l'app come SCHERMATA HOME. "
+                        "Così riparte da sola quando si riaccende il telefono e il tasto Home "
+                        "riporta sempre all'orologio.", 16)
+            self._scelta("USA COME SCHERMATA HOME\n[size=14]scegli «Promemoria Medicine»[/size]",
+                         BLU, lambda: apri_impostazioni_telefono("android.settings.HOME_SETTINGS"),
+                         dp(80), 18)
+            self.corpo.children[0].markup = True
+        self._scelta("AVANTI  >", VERDE if ok else GRIGIO, lambda: self.vai("batteria"))
+
+    def p_batteria(self):
+        ok = batteria_senza_limiti()
+        self.lbl_titolo.text = "Risparmio batteria"
+        self._testo("Il risparmio batteria di Android potrebbe «addormentare» l'app e "
+                    "farle saltare una sveglia. Va tolto per Promemoria Medicine.", 17)
+        self._stato(ok, "nessun limite", "c'è un limite da togliere")
+        if not ok:
+            self._testo("Tocca il pulsante e rispondi «Consenti».", 15, GRIGIO)
+            self._scelta("TOGLI IL LIMITE", VERDE, chiedi_batteria_senza_limiti)
+        self._scelta("AVANTI  >", VERDE if ok else GRIGIO, self._dopo_batteria)
+
+    def _dopo_batteria(self):
+        esempi = [m for m in App.get_running_app().medicine if e_esempio(m)]
+        self.vai("esempi" if esempi else "persone")
+
+    def p_esempi(self):
+        app = App.get_running_app()
+        esempi = [m for m in app.medicine if e_esempio(m)]
+        self.lbl_titolo.text = "Medicine di esempio"
+        self._testo("Nell'app ci sono medicine inventate, messe solo per mostrare come funziona:", 17)
+        self._testo("\n".join(f"• {m['nome']} ({', '.join(m['orari'])})" for m in esempi), 17,
+                    bold=True)
+        self._testo("Vuoi cancellarle?", 18)
+        self._scelta("SÌ, CANCELLALE", VERDE, self._cancella_esempi)
+        self._scelta("NO, tienile per fare prove", GRIGIO, lambda: self.vai("persone"), dp(60), 17)
+
+    def _cancella_esempi(self):
+        app = App.get_running_app()
+        app.medicine = [m for m in app.medicine if not e_esempio(m)]
+        app.salva()
+        self.vai("persone")
+
+    def p_persone(self):
+        app = App.get_running_app()
+        self.lbl_titolo.text = "Chi prende le medicine?"
+        self._testo("Scrivi il nome di ogni persona (come la chiamate in casa: la voce "
+                    "lo pronuncerà). Una persona va benissimo. Lascia vuoto per togliere.", 16)
+        self.campi_persone = []
+        for p in app.persone:
+            self._campo_persona(p)
+        for _ in range(max(1, 3 - len(app.persone))):
+            self._campo_persona(None)
+        self._scelta("AVANTI  >", VERDE, self._salva_persone)
+
+    def _campo_persona(self, persona):
+        forte = colori_di(persona)[0] if persona else "#B0B0B0"
+        r = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(8))
+        quadro = Label(size_hint_x=None, width=dp(16))
+        sfondo(quadro, forte)
+        r.add_widget(quadro)
+        ti = TextInput(text=persona["nome"] if persona else "", multiline=False,
+                       font_size=sp(22), hint_text="nome")
+        r.add_widget(ti)
+        self.corpo.add_widget(r)
+        self.campi_persone.append((persona, ti))
+
+    def _salva_persone(self):
+        app = App.get_running_app()
+        bloccate = []
+        for persona, ti in self.campi_persone:
+            nome = ti.text.strip()
+            if persona and nome:
+                persona["nome"] = nome
+            elif persona and not nome:
+                if any(m.get("persona") == persona["id"] for m in app.medicine):
+                    bloccate.append(persona["nome"])
+                else:
+                    app.persone.remove(persona)
+            elif nome:
+                usati = {p.get("colore") for p in app.persone}
+                liberi = [c for c in PALETTE if c not in usati] or list(PALETTE)
+                app.persone.append({"id": uuid.uuid4().hex[:8], "nome": nome, "colore": liberi[0]})
+        if not app.persone:
+            avviso("Attenzione", "Scrivi almeno un nome.")
+            self.disegna()
+            return
+        app.salva_persone()
+        if bloccate:
+            avviso("Non tolte", "Non ho tolto:\n" + "\n".join(bloccate) +
+                   "\nperché hanno ancora delle medicine.")
+        self.vai("suono")
+
+    def p_suono(self):
+        app = App.get_running_app()
+        self.lbl_titolo.text = "Prova del suono"
+        self._testo("Tocca il pulsante: per qualche secondo suona la suoneria, poi parla la voce. "
+                    "Usa il volume SVEGLIA, quindi si sente anche in silenzioso.", 17)
+        nome = app.persone[0]["nome"] if app.persone else ""
+        self._scelta("PROVA IL SUONO", ARANCIO, lambda: self._prova(nome), dp(80), 22)
+        self._testo("Se la voce non è chiara: Impostazioni del telefono > Gestione generale > "
+                    "Sintesi vocale > scegli il motore di Google e la voce italiana.", 14, GRIGIO)
+        self._scelta("SI SENTE BENE  >", VERDE, lambda: self.vai("avvisi"))
+
+    def _prova(self, nome):
+        voce = App.get_running_app().voce
+        self._ferma_prova()
+        voce.avvia_suoneria(0.7)
+
+        def parla(_):
+            voce.ferma_suoneria()
+            voce.parla(f"{nome}, questa è una prova. È ora di prendere la medicina."
+                       if nome else "Questa è una prova. È ora di prendere la medicina.")
+        self.ev_prova = Clock.schedule_once(parla, 5)
+
+    def _ferma_prova(self):
+        if self.ev_prova:
+            self.ev_prova.cancel()
+            self.ev_prova = None
+            voce = App.get_running_app().voce
+            voce.ferma_suoneria()
+            voce.zitto()
+
+    def p_avvisi(self):
+        self.lbl_titolo.text = "Avvisare un familiare?"
+        self._testo("L'app può mandare un SMS o un messaggio Telegram a un figlio o a chi "
+                    "assiste, per esempio se una medicina non viene confermata.", 17)
+        self._scelta("SÌ, li imposto alla fine", VERDE, lambda: self._avvisi(True))
+        self._scelta("NO, per ora no", GRIGIO, lambda: self._avvisi(False), dp(60), 18)
+
+    def _avvisi(self, si):
+        self.vuole_avvisi = si
+        self.vai("fine")
+
+    def p_fine(self):
+        app = App.get_running_app()
+        self._salva(configurato=True)
+        self.lbl_titolo.text = "Fatto!"
+        personale = app.avvisi.get("telefono_personale")
+        righe = [
+            "• Telefono: " + ("personale" if personale else "dedicato"),
+            "• Apertura automatica: " + ("OK" if puo_aprirsi_da_sola() else "DA ATTIVARE"),
+            "• Batteria: " + ("OK" if batteria_senza_limiti() else "DA SISTEMARE"),
+            "• Persone: " + ", ".join(p["nome"] for p in app.persone),
+            f"• Medicine inserite: {len(app.medicine)}",
+        ]
+        self._testo("\n".join(righe), 17)
+        self._testo("Le impostazioni si aprono dall'orologio tenendo premuto "
+                    "il pulsante in basso per 2 secondi.", 15, GRIGIO)
+        self._scelta("AGGIUNGI UNA MEDICINA", VERDE, lambda: self._esci("medicina"))
+        if self.vuole_avvisi:
+            self._scelta("IMPOSTA GLI AVVISI AI FAMILIARI", "#00897B", lambda: self._esci("avvisi"),
+                         dp(64), 18)
+        self._scelta("VAI ALL'OROLOGIO", GRIGIO, lambda: self._esci("principale"), dp(60), 18)
+
+    def _esci(self, dove):
+        app = App.get_running_app()
+        self._ferma_prova()
+        if dove == "medicina":
+            app.modifica(None)
+        else:
+            app.vai(dove)
+        app.programma_prossima(forza=True)
+
+
+# =====================================================
 #  IMPOSTAZIONI: STORICO
 # =====================================================
 class SchermataStorico(Screen):
@@ -1746,6 +2054,10 @@ class PromemoriaApp(App):
         self.persona_scr = SchermataPersona(name="persona")
         self.sm.add_widget(SchermataPersone(name="persone"))
         self.sm.add_widget(self.persona_scr)
+        self.guida = SchermataGuida(name="guida")
+        self.sm.add_widget(self.guida)
+        if not self.avvisi.get("configurato"):
+            Clock.schedule_once(lambda _: self.avvia_guida(), 0.5)
 
         self.principale.aggiorna_lista()
         Clock.schedule_once(lambda _: self.controlla(), 2)
@@ -1762,11 +2074,17 @@ class PromemoriaApp(App):
         self.applica_schermo()
         if self.sm.current == "gestione":
             self.sm.get_screen("gestione")._testo_schermo()
+        elif self.sm.current == "guida":
+            Clock.schedule_once(lambda _: self.guida.disegna(), 0.3)
         Clock.schedule_once(lambda _: self.controlla(), 0.5)   # se ci ha svegliato la sveglia
 
     def applica_schermo(self):
         dedicato = not self.avvisi.get("telefono_personale", False)
         imposta_schermo(bool(self.allarme) or dedicato)
+
+    def avvia_guida(self):
+        self.guida.ricomincia()
+        self.sm.current = "guida"
 
     def dopo_la_risposta(self):
         """Sul telefono personale l'app torna in secondo piano dopo la risposta
